@@ -18,10 +18,39 @@ import torch
 from verl.experimental.agent_loop.agent_loop import AgentLoopManager
 from verl.protocol import DataProto
 from verl.utils.ray_utils import auto_await
+from verl.utils.tokenizer import build_multimodal_processor_inputs
+
+# ── Monkey-patch DataProto.union to handle VLN flatten ────────────────────────
+# When VLNOnlineRolloutManager returns a flattened batch (M decision rows) and
+# the trainer tries batch.union(gen_output) with mismatched sizes (N vs M),
+# skip the union and use the flattened output directly. Subsequent unions
+# (reward, logprob) have matching sizes and work normally.
+_original_union = DataProto.union
+
+def _vln_union(self, other):
+    if getattr(other, "meta_info", None) and other.meta_info.get("vln_flattened"):
+        # Carry over meta_info keys the trainer expects (set on the original batch)
+        for key in ("temperature", "eos_token_id", "pad_token_id", "recompute_log_prob",
+                     "do_sample", "validate", "global_steps"):
+            if hasattr(self, "meta_info") and key in self.meta_info and key not in other.meta_info:
+                other.meta_info[key] = self.meta_info[key]
+        return other
+    return _original_union(self, other)
+
+DataProto.union = _vln_union
 
 
 class VLNOnlineRolloutManager(AgentLoopManager):
     """Full-episode rollout + flatten decisions."""
+
+    def _get_tokenizer_and_processor(self):
+        """Lazy-load tokenizer + multimodal processor (for computing pixel_values in flatten)."""
+        if not hasattr(self, "_tokenizer_cached"):
+            from transformers import AutoProcessor, AutoTokenizer
+            model_path = self.model_config.path
+            self._tokenizer_cached = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+            self._processor_cached = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+        return self._tokenizer_cached, self._processor_cached
 
     @auto_await
     async def generate_sequences(self, prompts: DataProto) -> DataProto:
@@ -68,6 +97,24 @@ class VLNOnlineRolloutManager(AgentLoopManager):
         if not all_rows:
             return one_to_one
 
+        # Pad to multiple of dp_size so actor update divisibility holds.
+        # Dummy rows have response_mask=0 → contribute nothing to gradient.
+        dp_size = getattr(self.rollout_config, 'agent', {}).get('num_workers', 4)
+        # Use fsdp_size as dp_size (the actual data-parallel partitioning factor)
+        try:
+            dp_size = self.config.actor_rollout_ref.actor.fsdp_config.fsdp_size
+        except Exception:
+            dp_size = 4
+        remainder = len(all_rows) % dp_size
+        if remainder:
+            pad_count = dp_size - remainder
+            dummy = {k: all_rows[0][k] for k in all_rows[0]}  # copy structure
+            dummy["response_mask"] = [0]  # no gradient
+            dummy["trajectory_reward"] = 0.0
+            dummy["images"] = None  # no multimodal for dummy
+            for _ in range(pad_count):
+                all_rows.append(dummy)
+
         # Step 3: build padded tensors (manual left-pad prompt, right-pad response)
         n = len(all_rows)
         prompts_t = torch.zeros(n, prompt_length, dtype=torch.long)
@@ -105,6 +152,29 @@ class VLNOnlineRolloutManager(AgentLoopManager):
             pad = input_ids.shape[1] - non_pad
             position_ids[i, pad:] = torch.arange(non_pad)
 
+        # Step 3b: compute multi_modal_inputs per decision (pixel_values for vision tower)
+        tokenizer, processor = self._get_tokenizer_and_processor()
+        mm_inputs_list = []
+        for i, row in enumerate(all_rows):
+            images = row.get("images")
+            mm_kwargs = row.get("mm_processor_kwargs") or {}
+            if processor is not None and images:
+                text = tokenizer.decode(input_ids[i], skip_special_tokens=True)
+                mm = build_multimodal_processor_inputs(
+                    processor, text=[text], images=images, mm_processor_kwargs=mm_kwargs,
+                )
+                mm.pop("input_ids", None)
+                mm.pop("attention_mask", None)
+                mm = dict(mm.convert_to_tensors("pt") if hasattr(mm, "convert_to_tensors") else mm)
+                image_grid_thw = mm.get("image_grid_thw")
+                if image_grid_thw is not None:
+                    mm["images_seqlens"] = torch.repeat_interleave(
+                        image_grid_thw[:, 1] * image_grid_thw[:, 2], image_grid_thw[:, 0]
+                    )
+                mm_inputs_list.append(mm)
+            else:
+                mm_inputs_list.append({})
+
         # Step 4: build non-tensor batch
         non_tensor = {
             "uid": np.array([row["uid"] for row in all_rows], dtype=object),
@@ -113,6 +183,7 @@ class VLNOnlineRolloutManager(AgentLoopManager):
             "decision_loss_weight": np.array([row["decision_loss_weight"] for row in all_rows], dtype=np.float32),
             "turn_id": np.array([row["turn_id"] for row in all_rows], dtype=np.int32),
             "action_text": np.array([row["action_text"] for row in all_rows], dtype=object),
+            "multi_modal_inputs": np.array(mm_inputs_list, dtype=object),
         }
 
         # Step 5: assemble DataProto
@@ -129,4 +200,9 @@ class VLNOnlineRolloutManager(AgentLoopManager):
 
         output = DataProto(batch=batch, non_tensor_batch=non_tensor)
         output.meta_info = one_to_one.meta_info  # carry timing etc.
+        output.meta_info["vln_flattened"] = True  # trigger patched union to skip batch mismatch
+        # Pre-set seqlen_sorted_indices to skip _balance_batch (which rebalances by
+        # token count → uneven per-GPU items → micro_batch divisibility failures).
+        # Our dp-padding already ensures M/dp is even; even split is correct.
+        output.meta_info["seqlen_sorted_indices"] = list(range(n))
         return output
