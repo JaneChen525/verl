@@ -1,0 +1,3 @@
+- name: vln_full_episode_agent
+  _target_: recipe.vln_navida.verl_agent_loop.VLNFullEpisodeAgentLoop
+  env_server_url: http://127.0.0.1:8002

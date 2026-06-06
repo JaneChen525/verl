@@ -30,6 +30,27 @@ def uniform_sample_with_ends(data: list, n: int) -> list:
     return [data[i] for i in idx]
 
 
+def build_navida_messages(instruction: str, pil_images: list, k_history: int = K_HISTORY):
+    """verl path: returns (messages_with_image_markers, ordered_pil_images).
+
+    pil_images[-1] = current frame (PIL), pil_images[:-1] = history.
+    Messages use {"type": "image"} markers; caller passes images to apply_chat_template.
+    """
+    current = pil_images[-1]
+    historic = uniform_sample_with_ends(pil_images[:-1], k_history) if len(pil_images) > 1 else [current]
+    images = list(historic) + [current]
+    content = [{"type": "text", "text": NAVIDA_INTRO}]
+    content += [{"type": "image"} for _ in historic]
+    content.append({"type": "text", "text": NAVIDA_BRIDGE})
+    content.append({"type": "image"})
+    content.append({"type": "text", "text": navida_tail(instruction)})
+    messages = [
+        {"role": "system", "content": [{"type": "text", "text": SYSTEM_PROMPT}]},
+        {"role": "user", "content": content},
+    ]
+    return messages, images
+
+
 def build_navida_messages_b64(instruction: str, b64_buffer: list, k_history: int = K_HISTORY):
     """b64_buffer = list of env_server JPEG base64 strings, [-1] = current frame.
 
