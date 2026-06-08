@@ -72,8 +72,11 @@ def _load_env(exp_config_path: str):
 
 
 def worker_loop(worker_id: int, exp_config_path: str,
-                cmd_queue: mp.Queue, resp_queue: mp.Queue, heartbeat_value):
+                cmd_queue: mp.Queue, resp_queue: mp.Queue, heartbeat_value,
+                gpu_id: int = -1):
     try:
+        if gpu_id >= 0:
+            os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
         env, episodes_by_id = _load_env(exp_config_path)
         resp_queue.put({"ok": True, "msg": f"worker {worker_id} ready ({len(episodes_by_id)} episodes)"})
     except Exception:

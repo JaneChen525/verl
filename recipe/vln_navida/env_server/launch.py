@@ -1,8 +1,12 @@
 """Entrypoint: python -m recipe.vln_navida.env_server.launch --exp-config config/vln_r2r.yaml
 
-Run on host (vln conda env, GPU 6):
-  CUDA_VISIBLE_DEVICES=6 python -m recipe.vln_navida.env_server.launch \\
-    --exp-config config/vln_r2r.yaml --port 8002 --pool-size 8 --session-ttl-sec 1800
+Run on host (vln conda env):
+  python -m recipe.vln_navida.env_server.launch \
+    --exp-config config/vln_r2r.yaml --port 8002 --pool-size 8 \
+    --gpu-ids 0,1,2,3,4,5,6,7
+
+Each worker gets its own GPU via CUDA_VISIBLE_DEVICES (1 worker per GPU).
+If --gpu-ids has fewer entries than --pool-size, they are cycled round-robin.
 """
 import argparse
 
@@ -18,8 +22,12 @@ def main():
     p.add_argument("--port", type=int, default=8002)
     p.add_argument("--pool-size", type=int, default=1)
     p.add_argument("--session-ttl-sec", type=float, default=1800.0)
+    p.add_argument("--gpu-ids", type=str, default=None,
+                   help="Comma-separated GPU IDs, one per worker (e.g. 0,1,2,3,4,5,6,7)")
     args = p.parse_args()
-    set_config(args.exp_config, pool_size=args.pool_size, session_ttl_sec=args.session_ttl_sec)
+    gpu_ids = [int(g) for g in args.gpu_ids.split(",")] if args.gpu_ids else None
+    set_config(args.exp_config, pool_size=args.pool_size,
+               session_ttl_sec=args.session_ttl_sec, gpu_ids=gpu_ids)
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
 

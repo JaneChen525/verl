@@ -97,17 +97,24 @@ class VLNOnlineRolloutManager(AgentLoopManager):
         if not all_rows:
             return one_to_one
 
-        # Pad to multiple of dp_size so actor update divisibility holds.
-        # Dummy rows have response_mask=0 → contribute nothing to gradient.
-        dp_size = getattr(self.rollout_config, 'agent', {}).get('num_workers', 4)
-        # Use fsdp_size as dp_size (the actual data-parallel partitioning factor)
+        # Pad to multiple of (fsdp_size * micro_batch_size) so each FSDP worker's
+        # shard is divisible by micro_batch_size_per_gpu (used in compute_log_prob
+        # and actor training). E.g. fsdp=8, micro=2 → pad to multiple of 16.
         try:
-            dp_size = self.config.actor_rollout_ref.actor.fsdp_config.fsdp_size
+            fsdp_size = self.config.actor_rollout_ref.actor.fsdp_config.fsdp_size
         except Exception:
-            dp_size = 4
-        remainder = len(all_rows) % dp_size
+            fsdp_size = 8
+        try:
+            micro_bs = max(
+                self.config.actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu,
+                self.config.actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu,
+            )
+        except Exception:
+            micro_bs = 2
+        pad_multiple = fsdp_size * micro_bs
+        remainder = len(all_rows) % pad_multiple
         if remainder:
-            pad_count = dp_size - remainder
+            pad_count = pad_multiple - remainder
             dummy = {k: all_rows[0][k] for k in all_rows[0]}  # copy structure
             dummy["response_mask"] = [0]  # no gradient
             dummy["trajectory_reward"] = 0.0
