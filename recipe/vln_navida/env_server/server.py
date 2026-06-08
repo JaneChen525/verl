@@ -26,7 +26,8 @@ _START_TIME = time.time()
 # ── Worker handle ─────────────────────────────────────────────────────────────
 
 class WorkerHandle:
-    def __init__(self, worker_id: int, exp_config_path: str, gpu_id: int = -1):
+    def __init__(self, worker_id: int, exp_config_path: str, gpu_id: int = -1,
+                 split_override: str | None = None):
         self.worker_id = worker_id
         self.gpu_id = gpu_id
         ctx = mp.get_context("spawn")
@@ -35,7 +36,8 @@ class WorkerHandle:
         self.heartbeat = ctx.Value("d", 0.0)
         self.proc = ctx.Process(
             target=worker_loop,
-            args=(worker_id, exp_config_path, self.cmd_q, self.resp_q, self.heartbeat, gpu_id),
+            args=(worker_id, exp_config_path, self.cmd_q, self.resp_q, self.heartbeat, gpu_id,
+                  split_override),
             daemon=True,
         )
         self.proc.start()
@@ -68,7 +70,7 @@ class WorkerHandle:
 
 class WorkerPool:
     def __init__(self, exp_config_path: str, pool_size: int, session_ttl_sec: float,
-                 gpu_ids: list[int] | None = None):
+                 gpu_ids: list[int] | None = None, split_override: str | None = None):
         self.pool_size = pool_size
         self.session_ttl_sec = session_ttl_sec
         if gpu_ids is None:
@@ -77,7 +79,8 @@ class WorkerPool:
             gpu_ids = gpu_ids * ((pool_size // len(gpu_ids)) + 1)
             gpu_ids = gpu_ids[:pool_size]
         self.workers: list[WorkerHandle] = [
-            WorkerHandle(i, exp_config_path, gpu_id=gpu_ids[i]) for i in range(pool_size)
+            WorkerHandle(i, exp_config_path, gpu_id=gpu_ids[i], split_override=split_override)
+            for i in range(pool_size)
         ]
         self._session_to_worker: dict[str, WorkerHandle] = {}
         self._lock = threading.Lock()
@@ -132,6 +135,7 @@ _exp_config_path: Optional[str] = None
 _pool_size: int = 1
 _session_ttl_sec: float = 1800.0
 _gpu_ids: list[int] | None = None
+_split_override: Optional[str] = None
 
 
 def _ttl_reaper():
@@ -145,7 +149,8 @@ def _ttl_reaper():
 async def lifespan(app: FastAPI):
     global _pool
     assert _exp_config_path, "call set_config() before starting uvicorn"
-    _pool = WorkerPool(_exp_config_path, _pool_size, _session_ttl_sec, gpu_ids=_gpu_ids)
+    _pool = WorkerPool(_exp_config_path, _pool_size, _session_ttl_sec, gpu_ids=_gpu_ids,
+                        split_override=_split_override)
     t = threading.Thread(target=_ttl_reaper, daemon=True)
     t.start()
     yield
@@ -269,9 +274,10 @@ def list_episodes(limit: int = 200):
 
 
 def set_config(exp_config_path: str, pool_size: int = 1, session_ttl_sec: float = 1800.0,
-               gpu_ids: list[int] | None = None):
-    global _exp_config_path, _pool_size, _session_ttl_sec, _gpu_ids
+               gpu_ids: list[int] | None = None, split_override: str | None = None):
+    global _exp_config_path, _pool_size, _session_ttl_sec, _gpu_ids, _split_override
     _exp_config_path = exp_config_path
     _pool_size = pool_size
     _session_ttl_sec = session_ttl_sec
     _gpu_ids = gpu_ids
+    _split_override = split_override

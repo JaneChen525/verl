@@ -32,7 +32,13 @@ class VLNEnv:
                 "config_path": extra_info.get("config_path", self._config_path)}
         deadline = asyncio.get_event_loop().time() + self._reset_timeout_s
         while True:
-            r = await self._client.post("/v1/sessions", json=body)
+            try:
+                r = await self._client.post("/v1/sessions", json=body)
+            except (httpx.ReadError, httpx.ConnectError, httpx.RemoteProtocolError) as exc:
+                if asyncio.get_event_loop().time() < deadline:
+                    await asyncio.sleep(self._reset_retry_s)
+                    continue
+                raise
             if r.status_code == 503 and asyncio.get_event_loop().time() < deadline:
                 await asyncio.sleep(self._reset_retry_s)
                 continue

@@ -13,52 +13,55 @@
 
 set -xeuo pipefail
 
+# ── vLLM multimodal cache: avoid LRU eviction race under concurrent agent loops
+export VLLM_MM_INPUT_CACHE_GIB=${VLLM_MM_INPUT_CACHE_GIB:-8}
+# ── Rollout window: max concurrent rollouts per generate_sequences call
+export VLN_ROLLOUT_WINDOW=${ROLLOUT_WINDOW:-8}
+
 # ── Paths ─────────────────────────────────────────────────────────────────────
 WORLDMODEL=${WORLDMODEL:-/workspace/WorldModel}
 export PYTHONPATH=${WORLDMODEL}/vln/reinforcement_learning:${WORLDMODEL}:${WORLDMODEL}/vln:${PYTHONPATH:-}
 
-MODEL_PATH=${MODEL_PATH:-${WORLDMODEL}/checkpoints/Qwen3-VL-4B-vln-r2r-merged}
-TRAIN_FILE=${TRAIN_FILE:-/root/data/vln_episodes_33.parquet}
-VAL_FILE=${VAL_FILE:-${TRAIN_FILE}}
+MODEL_PATH=${MODEL_PATH:-${WORLDMODEL}/checkpoints/Qwen3VL_4B_R2R_RxR_swift}
+TRAIN_FILE=${TRAIN_FILE:-/root/data/vln_r2r_train_10819.parquet}
+VAL_FILE=${VAL_FILE:-/root/data/vln_r2r_val_unseen_1839.parquet}
 AGENT_CFG=${AGENT_CFG:-${WORLDMODEL}/vln/reinforcement_learning/recipe/vln_navida/config/agent_loop.yaml}
 
 # ── GPU / Parallelism ─────────────────────────────────────────────────────────
 # 8×A100-40GB colocated: FSDP(8) + vLLM TP(8) → dp_size = n_gpus/tp = 1
-# TP=8 keeps single vLLM replica (dp=1), same code path as proven 4-GPU config.
-# No CPU offload — FSDP=8 splits optimizer across 8 GPUs (~4GB/GPU).
 NGPUS=${NGPUS:-8}
-ROLLOUT_TP=${ROLLOUT_TP:-8}          # vLLM tensor parallel (1 replica, dp=1)
-FSDP_SIZE=${FSDP_SIZE:-8}            # FSDP sharding across all 8 GPUs
+ROLLOUT_TP=${ROLLOUT_TP:-8}
+FSDP_SIZE=${FSDP_SIZE:-8}
 
 # ── Rollout ───────────────────────────────────────────────────────────────────
-ROLLOUT_N=${ROLLOUT_N:-4}            # GRPO group size (trials per episode)
-TEMPERATURE=${TEMPERATURE:-0.6}      # higher T for diverse rollouts (GRPO needs variance)
-MAX_MODEL_LEN=${MAX_MODEL_LEN:-4096} # NaVIDA prompt ~2300 tok
-GPU_MEM_UTIL=${GPU_MEM_UTIL:-0.5}    # 8 GPU: more headroom → higher util
-NUM_WORKERS=${NUM_WORKERS:-8}        # agent loop workers; must <= batch*n
+ROLLOUT_N=${ROLLOUT_N:-4}             # GRPO group size
+TEMPERATURE=${TEMPERATURE:-0.6}
+MAX_MODEL_LEN=${MAX_MODEL_LEN:-4096}
+GPU_MEM_UTIL=${GPU_MEM_UTIL:-0.5}
+NUM_WORKERS=${NUM_WORKERS:-8}
+ROLLOUT_WINDOW=${ROLLOUT_WINDOW:-8}   # concurrency control: rollouts per window
 
 # ── Data ──────────────────────────────────────────────────────────────────────
-TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-4}  # episodes per training step
+TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-32}  # 32 episodes × n=4 = 128 rollouts/step
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-4096}
-MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-256}  # action text ~20-30 tokens
+MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-256}
 
 # ── Actor (PPO/GRPO update) ──────────────────────────────────────────────────
-# KEY CONSTRAINTS (dp_size = NGPUS/TP = 8/8 = 1):
-#   ppo_mini_batch_size <= real_train_batch_size (= TRAIN_BATCH_SIZE * ROLLOUT_N)
-#   real_train_batch_size % FSDP_SIZE(=8) == 0
-PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-4}
-PPO_MICRO_BATCH_SIZE=${PPO_MICRO_BATCH_SIZE:-1}  # dp=1, no divisibility constraint
+# real_train_batch_size = 32 × 4 = 128; verl check: train_batch_size >= ppo_mini_batch_size
+PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-32}
+PPO_MICRO_BATCH_SIZE=${PPO_MICRO_BATCH_SIZE:-1}
 ACTOR_LR=${ACTOR_LR:-5e-7}
 KL_LOSS_COEF=${KL_LOSS_COEF:-0.001}
+CLIP_GRAD=${CLIP_GRAD:-1.0}
 
 # ── Logprob (old + ref) ──────────────────────────────────────────────────────
-LOG_PROB_MICRO=${LOG_PROB_MICRO:-1}  # dp=1, same as proven 4-GPU config
+LOG_PROB_MICRO=${LOG_PROB_MICRO:-1}
 
 # ── Trainer ───────────────────────────────────────────────────────────────────
-TOTAL_STEPS=${TOTAL_STEPS:-20}
+TOTAL_STEPS=${TOTAL_STEPS:-339}       # ceil(10819/32) ≈ 339 steps = 1 epoch
 PROJECT=${PROJECT:-vln-grpo}
-EXPERIMENT=${EXPERIMENT:-qwen3vl-navida-full-episode}
-SAVE_FREQ=${SAVE_FREQ:-5}
+EXPERIMENT=${EXPERIMENT:-p5-r2r-train-10k}
+SAVE_FREQ=${SAVE_FREQ:-10}
 TEST_FREQ=${TEST_FREQ:--1}
 
 # ── Launch ────────────────────────────────────────────────────────────────────
@@ -83,6 +86,7 @@ python3 -m verl.trainer.main_ppo \
   actor_rollout_ref.rollout.max_model_len=${MAX_MODEL_LEN} \
   actor_rollout_ref.rollout.enforce_eager=True \
   actor_rollout_ref.rollout.free_cache_engine=True \
+  actor_rollout_ref.rollout.enable_prefix_caching=False \
   actor_rollout_ref.rollout.n=${ROLLOUT_N} \
   actor_rollout_ref.rollout.temperature=${TEMPERATURE} \
   actor_rollout_ref.rollout.max_num_seqs=4 \
@@ -96,6 +100,7 @@ python3 -m verl.trainer.main_ppo \
   ++actor_rollout_ref.rollout.agent.agent_loop_manager_class=recipe.vln_navida.online_rollout_manager.VLNOnlineRolloutManager \
   actor_rollout_ref.actor.strategy=fsdp \
   actor_rollout_ref.actor.optim.lr=${ACTOR_LR} \
+  actor_rollout_ref.actor.optim.clip_grad=${CLIP_GRAD} \
   actor_rollout_ref.actor.ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE} \
   actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${PPO_MICRO_BATCH_SIZE} \
   actor_rollout_ref.actor.ppo_max_token_len_per_gpu=8192 \
@@ -109,13 +114,14 @@ python3 -m verl.trainer.main_ppo \
   actor_rollout_ref.ref.fsdp_config.param_offload=True \
   actor_rollout_ref.ref.log_prob_use_dynamic_bsz=False \
   actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${MAX_MODEL_LEN} \
-  trainer.logger='[console]' \
+  trainer.logger='[console,wandb]' \
   trainer.project_name=${PROJECT} \
   trainer.experiment_name=${EXPERIMENT} \
   trainer.n_gpus_per_node=${NGPUS} \
   trainer.nnodes=1 \
   trainer.save_freq=${SAVE_FREQ} \
   trainer.test_freq=${TEST_FREQ} \
+  trainer.val_before_train=False \
   trainer.total_epochs=1 \
   trainer.total_training_steps=${TOTAL_STEPS} \
   trainer.balance_batch=False \

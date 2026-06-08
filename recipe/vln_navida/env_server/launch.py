@@ -24,10 +24,13 @@ def main():
     p.add_argument("--session-ttl-sec", type=float, default=1800.0)
     p.add_argument("--gpu-ids", type=str, default=None,
                    help="Comma-separated GPU IDs, one per worker (e.g. 0,1,2,3,4,5,6,7)")
+    p.add_argument("--split", type=str, default=None,
+                   help="Override dataset split (e.g. train, val_unseen)")
     args = p.parse_args()
     gpu_ids = [int(g) for g in args.gpu_ids.split(",")] if args.gpu_ids else None
     set_config(args.exp_config, pool_size=args.pool_size,
-               session_ttl_sec=args.session_ttl_sec, gpu_ids=gpu_ids)
+               session_ttl_sec=args.session_ttl_sec, gpu_ids=gpu_ids,
+               split_override=args.split)
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
 

@@ -44,7 +44,7 @@ def _make_metrics(info: dict, collisions: int) -> dict:
     }
 
 
-def _load_env(exp_config_path: str):
+def _load_env(exp_config_path: str, split_override: str | None = None):
     import habitat
     from habitat import Env
     from habitat.config.default import get_config
@@ -55,6 +55,11 @@ def _load_env(exp_config_path: str):
 
     config = get_config(exp_config_path)
     with habitat.config.read_write(config):
+        if split_override:
+            config.habitat.dataset.split = split_override
+            data_path_tpl = config.habitat.dataset.data_path
+            if "{split}" in data_path_tpl:
+                config.habitat.dataset.data_path = data_path_tpl.replace("{split}", split_override)
         config.habitat.task.measurements.update({
             "top_down_map": TopDownMapMeasurementConfig(
                 map_padding=3, map_resolution=1024,
@@ -73,11 +78,11 @@ def _load_env(exp_config_path: str):
 
 def worker_loop(worker_id: int, exp_config_path: str,
                 cmd_queue: mp.Queue, resp_queue: mp.Queue, heartbeat_value,
-                gpu_id: int = -1):
+                gpu_id: int = -1, split_override: str | None = None):
     try:
         if gpu_id >= 0:
             os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-        env, episodes_by_id = _load_env(exp_config_path)
+        env, episodes_by_id = _load_env(exp_config_path, split_override=split_override)
         resp_queue.put({"ok": True, "msg": f"worker {worker_id} ready ({len(episodes_by_id)} episodes)"})
     except Exception:
         resp_queue.put({"ok": False, "error": traceback.format_exc()})
