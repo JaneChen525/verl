@@ -67,6 +67,8 @@ class VLNOnlineRolloutManager(AgentLoopManager):
 
         # Collect all decisions from all trajectories
         all_rows = []
+        traj_rewards = []
+        traj_successes = []
         for traj_data in trajectories:
             if traj_data is None:
                 continue
@@ -75,6 +77,9 @@ class VLNOnlineRolloutManager(AgentLoopManager):
             reward = traj_data["reward"]
             num_decisions = traj_data["num_decisions"]
             decisions = traj_data.get("decisions", [])
+            traj_rewards.append(reward)
+            metrics = traj_data.get("metrics", {})
+            traj_successes.append(float(metrics.get("success", 0.0)))
 
             for dec in decisions:
                 all_rows.append({
@@ -212,4 +217,13 @@ class VLNOnlineRolloutManager(AgentLoopManager):
         # token count → uneven per-GPU items → micro_batch divisibility failures).
         # Our dp-padding already ensures M/dp is even; even split is correct.
         output.meta_info["seqlen_sorted_indices"] = list(range(n))
+
+        # Log VLN rollout summary
+        if traj_rewards:
+            r = np.array(traj_rewards)
+            s = np.array(traj_successes)
+            print(f"[VLN rollout] {len(traj_rewards)} trajectories, "
+                  f"{len(all_rows)} decisions (padded {n}), "
+                  f"SR={s.mean():.1%}, reward={r.mean():.3f}±{r.std():.3f}")
+
         return output

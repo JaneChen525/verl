@@ -37,9 +37,11 @@ def _b64_to_pil(b64: str) -> Image.Image:
 class VLNFullEpisodeAgentLoop(AgentLoopBase):
     """One run() = one full episode. Decisions stored in extra_fields for flatten."""
 
-    def __init__(self, *args, env_server_url: str = "http://127.0.0.1:8002", **kwargs):
+    def __init__(self, *args, env_server_url: str = "http://127.0.0.1:8002",
+                 progress_coef: float = 0.0, **kwargs):
         super().__init__(*args, **kwargs)
         self.env_server_url = os.environ.get("VLN_ENV_SERVER_URL", env_server_url)
+        self.progress_coef = float(os.environ.get("VLN_PROGRESS_COEF", progress_coef))
         self.prompt_length = self.rollout_config.prompt_length
         self.response_length = self.rollout_config.response_length
 
@@ -85,6 +87,7 @@ class VLNFullEpisodeAgentLoop(AgentLoopBase):
                 env, extra, verl_decide,
                 group_uid=uid,
                 trajectory_uid=f"{uid}#{uuid4().hex[:8]}",
+                progress_coef=self.progress_coef,
             )
         finally:
             await env.close()

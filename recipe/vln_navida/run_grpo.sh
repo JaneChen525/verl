@@ -31,8 +31,8 @@ ROLLOUT_TP=${ROLLOUT_TP:-8}          # vLLM tensor parallel (1 replica, dp=1)
 FSDP_SIZE=${FSDP_SIZE:-8}            # FSDP sharding across all 8 GPUs
 
 # ── Rollout ───────────────────────────────────────────────────────────────────
-ROLLOUT_N=${ROLLOUT_N:-2}            # GRPO group size (trials per episode)
-TEMPERATURE=${TEMPERATURE:-0.3}      # T>0 required for GRPO diversity
+ROLLOUT_N=${ROLLOUT_N:-4}            # GRPO group size (trials per episode)
+TEMPERATURE=${TEMPERATURE:-0.6}      # higher T for diverse rollouts (GRPO needs variance)
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-4096} # NaVIDA prompt ~2300 tok
 GPU_MEM_UTIL=${GPU_MEM_UTIL:-0.5}    # 8 GPU: more headroom → higher util
 NUM_WORKERS=${NUM_WORKERS:-8}        # agent loop workers; must <= batch*n
@@ -55,10 +55,10 @@ KL_LOSS_COEF=${KL_LOSS_COEF:-0.001}
 LOG_PROB_MICRO=${LOG_PROB_MICRO:-1}  # dp=1, same as proven 4-GPU config
 
 # ── Trainer ───────────────────────────────────────────────────────────────────
-TOTAL_STEPS=${TOTAL_STEPS:-1}
+TOTAL_STEPS=${TOTAL_STEPS:-20}
 PROJECT=${PROJECT:-vln-grpo}
 EXPERIMENT=${EXPERIMENT:-qwen3vl-navida-full-episode}
-SAVE_FREQ=${SAVE_FREQ:--1}
+SAVE_FREQ=${SAVE_FREQ:-5}
 TEST_FREQ=${TEST_FREQ:--1}
 
 # ── Launch ────────────────────────────────────────────────────────────────────
