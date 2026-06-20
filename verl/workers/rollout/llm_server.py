@@ -64,6 +64,7 @@ class GlobalRequestLoadBalancer:
         self._servers: dict[str, ray.actor.ActorHandle] = dict(servers)
         self._inflight_requests: dict[str, int] = {sid: 0 for sid in servers}
         self._request_id_to_server: LRUCache = LRUCache(maxsize=max_cache_size)
+        self._rr_counter: int = 0
 
     def acquire_server(self, request_id: str) -> tuple[str, ray.actor.ActorHandle]:
         """Acquire a server for the given request (sticky + least-loaded).
@@ -85,7 +86,10 @@ class GlobalRequestLoadBalancer:
         if not self._inflight_requests:
             raise RuntimeError("No available servers in load balancer")
 
-        server_id = min(self._inflight_requests, key=self._inflight_requests.get)
+        min_load = min(self._inflight_requests.values())
+        candidates = [sid for sid, load in self._inflight_requests.items() if load == min_load]
+        server_id = candidates[self._rr_counter % len(candidates)]
+        self._rr_counter += 1
         self._request_id_to_server[request_id] = server_id
         self._inflight_requests[server_id] += 1
         return server_id, self._servers[server_id]

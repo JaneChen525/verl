@@ -923,6 +923,10 @@ class FSDPEngineWithLMHead(FSDPEngine):
         input_ids = micro_batch["input_ids"]
         position_ids = micro_batch["position_ids"]
 
+        # Check for flattened mRoPE position_ids from TQ (see main_ppo_sync.py)
+        _pos_channels = micro_batch.get("_position_ids_channels", None)
+        _pos_flat = _pos_channels is not None and isinstance(_pos_channels, torch.Tensor)
+
         if not isinstance(temperature, torch.Tensor):
             temperature = torch.tensor([temperature] * input_ids.shape[0], device=input_ids.device)
 
@@ -941,7 +945,13 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
             if pad_mode == DatasetPadMode.NO_PADDING:
                 input_ids_rmpad = input_ids.values().unsqueeze(0)  # (1, total_nnz)
-                if position_ids.dim() == 3:
+                if _pos_flat:
+                    # Reconstruct flattened mRoPE: (total_tokens*C,) → (C, 1, total_tokens)
+                    channels = int(_pos_channels[0].item()) if isinstance(_pos_channels, torch.Tensor) else int(_pos_channels)
+                    flat_vals = position_ids.values()  # (total_tokens * C,)
+                    total_tokens = flat_vals.numel() // channels
+                    position_ids_rmpad = flat_vals.view(total_tokens, channels).transpose(0, 1).contiguous().unsqueeze(1)
+                elif position_ids.dim() == 3:
                     position_ids_rmpad = position_ids.values().unsqueeze(1)  # (4, 1, total_nnz)
                 else:
                     position_ids_rmpad = position_ids.values().unsqueeze(0)  # (1, total_nnz)

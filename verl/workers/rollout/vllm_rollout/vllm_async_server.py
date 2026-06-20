@@ -234,7 +234,7 @@ class vLLMHttpServer:
         compilation_config = engine_kwargs.pop("compilation_config", None) or {}
         if isinstance(compilation_config, str):
             compilation_config = json.loads(compilation_config)
-        compilation_config.setdefault("cudagraph_mode", "FULL_AND_PIECEWISE")
+        compilation_config.setdefault("cudagraph_mode", "FULL_DECODE_ONLY")
 
         # FULL cuda graph is not yet supported with DCP, downgrade to PIECEWISE
         dcp_size = engine_kwargs.get("decode_context_parallel_size", 1) or 1

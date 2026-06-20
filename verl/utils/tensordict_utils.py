@@ -357,11 +357,15 @@ def chunk_tensordict(td: TensorDict, chunks: int) -> list[TensorDict]:
             padded_chunks = padded.chunk(chunks, dim=0)
             offsets = nt.offsets()
             lengths = offsets.diff().tolist()
+            ragged_idx = getattr(nt, "_ragged_idx", nt.dim() - 1)
             for i, chunk_td in enumerate(tds):
                 chunk_lengths = lengths[i * chunk_size : (i + 1) * chunk_size]
-                chunk_tensors = [padded_chunks[i][j, :seq_len] for j, seq_len in enumerate(chunk_lengths)]
+                if padded.dim() == 3:
+                    chunk_tensors = [padded_chunks[i][j, :, :seq_len] for j, seq_len in enumerate(chunk_lengths)]
+                else:
+                    chunk_tensors = [padded_chunks[i][j, :seq_len] for j, seq_len in enumerate(chunk_lengths)]
                 chunk_td[key] = nested_tensor_from_tensor_list(
-                    chunk_tensors, ragged_idx=getattr(nt, "_ragged_idx", nt.dim() - 1)
+                    chunk_tensors, ragged_idx=ragged_idx
                 )
             continue
 

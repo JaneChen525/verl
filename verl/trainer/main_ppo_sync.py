@@ -390,7 +390,8 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
         if final_output.reward_score is not None:
             for output in outputs[:-1]:
                 output.reward_score = final_output.reward_score
-                output.extra_fields["reward_extra_info"] = final_output.extra_fields["reward_extra_info"]
+                if "reward_extra_info" in final_output.extra_fields:
+                    output.extra_fields["reward_extra_info"] = final_output.extra_fields["reward_extra_info"]
 
         # NOTE: agent loop may has multiple outputs, put each output into TransferQueue.
         # key format: {uid}_{session_id}_{index}
@@ -403,10 +404,20 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             responses = torch.tensor(output.response_ids, dtype=torch.int64)
             input_ids = torch.cat([prompts, responses], dim=0)
             attention_mask = torch.ones_like(input_ids, dtype=torch.int64)
-            multi_modal_inputs = self._compute_multi_modal_inputs(output, input_ids)
-            position_ids = self._compute_position_ids(
-                input_ids.unsqueeze(0), attention_mask.unsqueeze(0), multi_modal_inputs
-            ).squeeze(0)
+            # Allow agent loop to provide pre-computed mm_inputs/position_ids
+            # (needed for VLN multi-image prompts where decode→re-process breaks)
+            precomputed_mm = output.extra_fields.pop("_precomputed_mm_inputs", None)
+            precomputed_pos = output.extra_fields.pop("_precomputed_position_ids", None)
+            if precomputed_mm is not None:
+                multi_modal_inputs = precomputed_mm
+            else:
+                multi_modal_inputs = self._compute_multi_modal_inputs(output, input_ids)
+            if precomputed_pos is not None:
+                position_ids = precomputed_pos
+            else:
+                position_ids = self._compute_position_ids(
+                    input_ids.unsqueeze(0), attention_mask.unsqueeze(0), multi_modal_inputs
+                ).squeeze(0)
 
             keys.append(f"{uid}_{session_id}_{i}")
             field = output.as_dict()
@@ -416,7 +427,13 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             # TODO: uniform response_mask and loss_mask
             field["loss_mask"] = field["response_mask"]
             field["input_ids"] = input_ids
-            field["position_ids"] = position_ids
+            # Flatten 3D mRoPE position_ids (4, L) → (L*4,) for TQ roundtrip safety.
+            # 3D nested tensors get corrupted by TQ serialization. Reconstruct in FSDP worker.
+            if position_ids.dim() == 2 and position_ids.shape[0] in (3, 4):
+                field["position_ids"] = position_ids.transpose(0, 1).contiguous().view(-1)
+                field["_position_ids_channels"] = torch.tensor(position_ids.shape[0], dtype=torch.long)
+            else:
+                field["position_ids"] = position_ids
             field["multi_modal_inputs"] = multi_modal_inputs
             fields.append(field)
             prompt_len, response_len = field["prompts"].size(0), field["responses"].size(0)
