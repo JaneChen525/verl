@@ -60,6 +60,7 @@ from verl.utils.fsdp_utils import (
     replace_lora_wrapper,
 )
 from verl.utils.model import convert_weight_keys, extract_multi_modal_inputs
+from verl.utils.tokenizer import build_multimodal_processor_inputs
 from verl.utils.py_functional import convert_to_regular_types
 from verl.utils.torch_functional import logprobs_from_logits
 from verl.utils.ulysses import (
@@ -907,7 +908,72 @@ class EngineTrainModeCtx(BaseEngineCtx):
 
 @EngineRegistry.register(model_type="language_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
 class FSDPEngineWithLMHead(FSDPEngine):
+    def _get_vln_processor(self):
+        if not hasattr(self, "_vln_processor"):
+            self._vln_processor = self.model_config.get_processor()
+        return self._vln_processor
+
+    def _maybe_materialize_vln_mm_inputs(self, micro_batch: TensorDict):
+        if "multi_modal_inputs" in micro_batch:
+            return
+        image_buffer_refs = micro_batch.get("image_buffer_ref")
+        if image_buffer_refs is None:
+            return
+        import base64, io, ray
+        from PIL import Image
+        from tensordict.tensorclass import NonTensorData, NonTensorStack
+
+        processor = self._get_vln_processor()
+        if processor is None or not hasattr(processor, "image_processor"):
+            return
+
+        input_ids = micro_batch["input_ids"]
+        device = input_ids.values().device if getattr(input_ids, "is_nested", False) else input_ids.device
+
+        bsz = micro_batch.batch_size[0]
+        mm_inputs_list = []
+        for i in range(bsz):
+            ref = image_buffer_refs[i]
+            ref = ref.data if isinstance(ref, NonTensorData) else ref
+            indices = micro_batch["image_indices"][i]
+            indices = indices.data if isinstance(indices, NonTensorData) else indices
+            prompt = micro_batch["raw_prompt"][i]
+            prompt = prompt.data if isinstance(prompt, NonTensorData) else prompt
+            mm_kwargs = micro_batch.get("mm_processor_kwargs")
+            if mm_kwargs is not None:
+                mm_kwargs = mm_kwargs[i]
+                mm_kwargs = mm_kwargs.data if isinstance(mm_kwargs, NonTensorData) else mm_kwargs
+            else:
+                mm_kwargs = {}
+
+            if ref is None or indices is None or not prompt:
+                mm_inputs_list.append({})
+                continue
+
+            buffer = ray.get(ref) if isinstance(ref, ray.ObjectRef) else ref
+            pil_images = [Image.open(io.BytesIO(base64.b64decode(buffer[idx]))).convert("RGB") for idx in indices]
+            mm = build_multimodal_processor_inputs(
+                processor, text=[prompt], images=pil_images, mm_processor_kwargs=mm_kwargs or {},
+            )
+            mm.pop("input_ids", None)
+            mm.pop("attention_mask", None)
+            mm = dict(mm.convert_to_tensors("pt") if hasattr(mm, "convert_to_tensors") else mm)
+            image_grid_thw = mm.get("image_grid_thw")
+            if image_grid_thw is not None:
+                mm["images_seqlens"] = torch.repeat_interleave(
+                    image_grid_thw[:, 1] * image_grid_thw[:, 2], image_grid_thw[:, 0]
+                )
+            mm = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in mm.items()}
+            mm_inputs_list.append(mm)
+            del pil_images
+
+        micro_batch["multi_modal_inputs"] = NonTensorStack.from_list(
+            [NonTensorData(item) for item in mm_inputs_list]
+        )
+
     def prepare_model_inputs(self, micro_batch: TensorDict):
+        self._maybe_materialize_vln_mm_inputs(micro_batch)
+
         use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
         pad_mode = tu.get_non_tensor_data(data=micro_batch, key="pad_mode", default=DatasetPadMode.NO_PADDING)
         use_fused_kernels = tu.get_non_tensor_data(data=micro_batch, key="use_fused_kernels", default=False)

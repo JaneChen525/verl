@@ -17,6 +17,7 @@ import base64
 import io
 
 import numpy as np
+import ray
 import torch
 from PIL import Image
 
@@ -95,6 +96,7 @@ class VLNOnlineRolloutManager(AgentLoopManager):
             num_decisions = traj_data["num_decisions"]
             decisions = traj_data.get("decisions", [])
             image_buffer = traj_data.get("image_buffer", [])
+            image_buffer_ref = ray.put(image_buffer) if image_buffer else None
             traj_rewards.append(reward)
             metrics = traj_data.get("metrics", {})
             traj_successes.append(float(metrics.get("success", 0.0)))
@@ -105,7 +107,7 @@ class VLNOnlineRolloutManager(AgentLoopManager):
                     "response_ids": dec["response_ids"],
                     "response_logprobs": dec.get("response_logprobs"),
                     "response_mask": dec["response_mask"],
-                    "image_buffer": image_buffer,
+                    "image_buffer_ref": image_buffer_ref,
                     "image_indices": dec.get("image_indices"),
                     "raw_prompt": dec.get("raw_prompt"),
                     "mm_processor_kwargs": dec.get("mm_processor_kwargs"),
@@ -150,7 +152,7 @@ class VLNOnlineRolloutManager(AgentLoopManager):
             dummy = {k: all_rows[0][k] for k in all_rows[0]}
             dummy["response_mask"] = [0]
             dummy["trajectory_reward"] = 0.0
-            dummy["image_buffer"] = None
+            dummy["image_buffer_ref"] = None
             dummy["image_indices"] = None
             dummy["raw_prompt"] = None
             for _ in range(pad_count):
@@ -188,31 +190,6 @@ class VLNOnlineRolloutManager(AgentLoopManager):
             pad = input_ids.shape[1] - non_pad
             position_ids[i, pad:] = torch.arange(non_pad)
 
-        _, processor = self._get_tokenizer_and_processor()
-        mm_inputs_list = []
-        for i, row in enumerate(all_rows):
-            image_buffer = row.get("image_buffer")
-            image_indices = row.get("image_indices")
-            raw_prompt = row.get("raw_prompt")
-            mm_kwargs = row.get("mm_processor_kwargs") or {}
-            if processor is not None and image_buffer and image_indices and raw_prompt:
-                pil_images = [_b64_to_pil(image_buffer[idx]) for idx in image_indices]
-                mm = build_multimodal_processor_inputs(
-                    processor, text=[raw_prompt], images=pil_images, mm_processor_kwargs=mm_kwargs,
-                )
-                mm.pop("input_ids", None)
-                mm.pop("attention_mask", None)
-                mm = dict(mm.convert_to_tensors("pt") if hasattr(mm, "convert_to_tensors") else mm)
-                image_grid_thw = mm.get("image_grid_thw")
-                if image_grid_thw is not None:
-                    mm["images_seqlens"] = torch.repeat_interleave(
-                        image_grid_thw[:, 1] * image_grid_thw[:, 2], image_grid_thw[:, 0]
-                    )
-                mm_inputs_list.append(mm)
-                del pil_images
-            else:
-                mm_inputs_list.append({})
-
         non_tensor = {
             "uid": np.array([row["uid"] for row in all_rows], dtype=object),
             "trajectory_uid": np.array([row["trajectory_uid"] for row in all_rows], dtype=object),
@@ -220,7 +197,10 @@ class VLNOnlineRolloutManager(AgentLoopManager):
             "decision_loss_weight": np.array([row["decision_loss_weight"] for row in all_rows], dtype=np.float32),
             "turn_id": np.array([row["turn_id"] for row in all_rows], dtype=np.int32),
             "action_text": np.array([row["action_text"] for row in all_rows], dtype=object),
-            "multi_modal_inputs": np.array(mm_inputs_list, dtype=object),
+            "image_buffer_ref": np.array([row.get("image_buffer_ref") for row in all_rows], dtype=object),
+            "image_indices": np.array([row.get("image_indices") for row in all_rows], dtype=object),
+            "raw_prompt": np.array([row.get("raw_prompt") or "" for row in all_rows], dtype=object),
+            "mm_processor_kwargs": np.array([row.get("mm_processor_kwargs") or {} for row in all_rows], dtype=object),
         }
 
         from tensordict import TensorDict
