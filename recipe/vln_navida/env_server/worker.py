@@ -96,16 +96,18 @@ def worker_loop(worker_id: int, exp_config_path: str,
         heartbeat_value.value = time.time()
         cmd = cmd_queue.get()
         op = cmd.get("op")
+        req_id = cmd.get("request_id")
         try:
             if op == "close":
                 env.close()
-                resp_queue.put({"ok": True})
+                resp_queue.put({"ok": True, "request_id": req_id})
                 return
 
             if op == "reset":
                 ep_id = str(cmd["episode_id"])
                 if ep_id not in episodes_by_id:
-                    resp_queue.put({"ok": False, "error": f"episode_id {ep_id} not found"})
+                    resp_queue.put({"ok": False, "error": f"episode_id {ep_id} not found",
+                                    "request_id": req_id})
                     continue
                 ep = episodes_by_id[ep_id]
                 env.current_episode = ep
@@ -117,6 +119,7 @@ def worker_loop(worker_id: int, exp_config_path: str,
                 info = env.get_metrics()
                 resp_queue.put({
                     "ok": True,
+                    "request_id": req_id,
                     "obs": _make_obs(obs["rgb"], obs["instruction"]["text"], step_count),
                     "metrics": _make_metrics(info, collisions),
                     "scene_id": scene_id,
@@ -146,6 +149,7 @@ def worker_loop(worker_id: int, exp_config_path: str,
                 collisions = int(raw_col.get("count", 0)) if isinstance(raw_col, dict) else 0
                 resp_queue.put({
                     "ok": True,
+                    "request_id": req_id,
                     "obs": _make_obs(last_obs["rgb"], last_obs["instruction"]["text"], step_count),
                     "metrics": _make_metrics(info, collisions),
                     "done": done,
@@ -156,16 +160,20 @@ def worker_loop(worker_id: int, exp_config_path: str,
 
             if op == "metrics":
                 info = env.get_metrics() if current_episode is not None else {}
-                resp_queue.put({"ok": True, "metrics": _make_metrics(info, collisions),
+                resp_queue.put({"ok": True, "request_id": req_id,
+                                "metrics": _make_metrics(info, collisions),
                                 "done": env.episode_over if current_episode else False})
                 continue
 
             if op == "episodes":
                 limit = int(cmd.get("limit", 200))
-                resp_queue.put({"ok": True, "episode_ids": list(episodes_by_id.keys())[:limit]})
+                resp_queue.put({"ok": True, "request_id": req_id,
+                                "episode_ids": list(episodes_by_id.keys())[:limit]})
                 continue
 
-            resp_queue.put({"ok": False, "error": f"unknown op: {op}"})
+            resp_queue.put({"ok": False, "request_id": req_id,
+                            "error": f"unknown op: {op}"})
 
         except Exception:
-            resp_queue.put({"ok": False, "error": traceback.format_exc()})
+            resp_queue.put({"ok": False, "request_id": req_id,
+                            "error": traceback.format_exc()})

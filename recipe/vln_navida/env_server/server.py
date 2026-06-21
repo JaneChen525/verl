@@ -3,7 +3,9 @@
 Each session = one Habitat episode on one dedicated worker process.
 TTL background task reclaims stale sessions (worker crash / client forgot to delete).
 """
+import logging
 import multiprocessing as mp
+import queue as _queue
 import threading
 import time
 import uuid
@@ -21,6 +23,11 @@ from recipe.vln_navida.env_server.schemas import (
 from recipe.vln_navida.env_server.worker import worker_loop
 
 _START_TIME = time.time()
+logger = logging.getLogger(__name__)
+
+
+class WorkerCallTimeout(Exception):
+    pass
 
 
 # ── Worker handle ─────────────────────────────────────────────────────────────
@@ -30,6 +37,8 @@ class WorkerHandle:
                  split_override: str | None = None):
         self.worker_id = worker_id
         self.gpu_id = gpu_id
+        self.exp_config_path = exp_config_path
+        self.split_override = split_override
         ctx = mp.get_context("spawn")
         self.cmd_q: mp.Queue = ctx.Queue()
         self.resp_q: mp.Queue = ctx.Queue()
@@ -47,11 +56,34 @@ class WorkerHandle:
         self.state: str = "idle"
         self.session_id: Optional[str] = None
         self.last_active: float = time.time()
+        self._call_lock = threading.Lock()
 
     def call(self, cmd: dict, timeout: float = 60.0) -> dict:
+        with self._call_lock:
+            return self._call_inner(cmd, timeout)
+
+    def _call_inner(self, cmd: dict, timeout: float) -> dict:
         self.last_active = time.time()
+        request_id = uuid.uuid4().hex
+        cmd = dict(cmd)
+        cmd["request_id"] = request_id
         self.cmd_q.put(cmd)
-        return self.resp_q.get(timeout=timeout)
+
+        deadline = time.time() + timeout
+        while True:
+            remain = deadline - time.time()
+            if remain <= 0:
+                raise WorkerCallTimeout(
+                    f"worker {self.worker_id} timeout on {cmd.get('op')}")
+            try:
+                r = self.resp_q.get(timeout=max(remain, 0.1))
+            except _queue.Empty:
+                raise WorkerCallTimeout(
+                    f"worker {self.worker_id} timeout on {cmd.get('op')}")
+            if r.get("request_id") == request_id:
+                return r
+            logger.warning("worker %d: dropped stale response (expected %s, got %s)",
+                           self.worker_id, request_id, r.get("request_id"))
 
     def is_alive(self) -> bool:
         return self.proc.is_alive()
@@ -64,6 +96,9 @@ class WorkerHandle:
             pass
         if self.proc.is_alive():
             self.proc.terminate()
+            self.proc.join(timeout=5)
+        if self.proc.is_alive():
+            self.proc.kill()
 
 
 # ── Worker pool ───────────────────────────────────────────────────────────────
@@ -73,11 +108,14 @@ class WorkerPool:
                  gpu_ids: list[int] | None = None, split_override: str | None = None):
         self.pool_size = pool_size
         self.session_ttl_sec = session_ttl_sec
+        self.exp_config_path = exp_config_path
+        self.split_override = split_override
         if gpu_ids is None:
             gpu_ids = [-1] * pool_size
         elif len(gpu_ids) < pool_size:
             gpu_ids = gpu_ids * ((pool_size // len(gpu_ids)) + 1)
             gpu_ids = gpu_ids[:pool_size]
+        self.gpu_ids = gpu_ids
         self.workers: list[WorkerHandle] = [
             WorkerHandle(i, exp_config_path, gpu_id=gpu_ids[i], split_override=split_override)
             for i in range(pool_size)
@@ -105,6 +143,29 @@ class WorkerPool:
             if w is not None:
                 w.state = "idle"
                 w.session_id = None
+
+    def replace_worker(self, w: WorkerHandle):
+        """Kill a broken worker and spawn a fresh one in its place."""
+        worker_id = w.worker_id
+        gpu_id = w.gpu_id
+        logger.warning("replacing worker %d (gpu %d)", worker_id, gpu_id)
+
+        with self._lock:
+            if w.session_id is not None:
+                self._session_to_worker.pop(w.session_id, None)
+            w.state = "restarting"
+            w.session_id = None
+
+        w.close()
+
+        new_w = WorkerHandle(
+            worker_id, self.exp_config_path,
+            gpu_id=gpu_id, split_override=self.split_override,
+        )
+
+        with self._lock:
+            self.workers[worker_id] = new_w
+        logger.info("worker %d replaced and ready", worker_id)
 
     def reap_stale(self):
         """Release sessions idle longer than TTL (worker crash or forgotten delete)."""
@@ -160,6 +221,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+_RESET_REQUIRED_KEYS = {"ok", "obs", "metrics", "scene_id", "episode_id", "instruction", "done"}
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -201,13 +264,31 @@ def create_session(req: CreateSessionRequest):
         raise HTTPException(503, detail={"error": {"code": "NO_FREE_WORKER",
             "message": "No free Habitat worker", "retryable": True}})
     try:
-        r = w.call({"op": "reset", "episode_id": req.episode_id, "session_id": session_id}, timeout=120)
+        r = w.call({"op": "reset", "episode_id": req.episode_id, "session_id": session_id},
+                   timeout=120)
+    except WorkerCallTimeout as e:
+        _pool.replace_worker(w)
+        raise HTTPException(503, detail={"error": {"code": "RESET_TIMEOUT",
+            "message": str(e), "retryable": True}})
     except Exception:
         _pool.release(session_id)
         raise
+
     if not r.get("ok"):
-        _pool.release(session_id)
-        raise HTTPException(400, detail=r.get("error"))
+        err_msg = r.get("error", "")
+        if "not found" in str(err_msg):
+            _pool.release(session_id)
+            raise HTTPException(400, detail=err_msg)
+        _pool.replace_worker(w)
+        raise HTTPException(503, detail={"error": {"code": "RESET_FAILED",
+            "message": str(err_msg), "retryable": True}})
+
+    missing = _RESET_REQUIRED_KEYS - set(r.keys())
+    if missing:
+        _pool.replace_worker(w)
+        raise HTTPException(503, detail={"error": {"code": "BAD_WORKER_RESPONSE",
+            "missing": sorted(missing), "retryable": True}})
+
     return CreateSessionResponse(
         session_id=session_id,
         worker_id=w.worker_id,
@@ -228,7 +309,12 @@ def step(session_id: str, req: StepRequest):
     for a in req.actions:
         if a not in (0, 1, 2, 3):
             raise HTTPException(400, detail=f"invalid action {a}")
-    r = w.call({"op": "step", "actions": req.actions}, timeout=60)
+    try:
+        r = w.call({"op": "step", "actions": req.actions}, timeout=60)
+    except WorkerCallTimeout as e:
+        _pool.replace_worker(w)
+        raise HTTPException(503, detail={"error": {"code": "STEP_TIMEOUT",
+            "message": str(e), "retryable": False}})
     if not r.get("ok"):
         raise HTTPException(500, detail=r.get("error"))
     if r["done"] and req.stop_on_done:
@@ -249,7 +335,12 @@ def get_metrics(session_id: str):
     w = _pool.get(session_id)
     if w is None:
         raise HTTPException(404, detail=f"session {session_id} not found")
-    r = w.call({"op": "metrics"}, timeout=10)
+    try:
+        r = w.call({"op": "metrics"}, timeout=10)
+    except WorkerCallTimeout as e:
+        _pool.replace_worker(w)
+        raise HTTPException(503, detail={"error": {"code": "METRICS_TIMEOUT",
+            "message": str(e), "retryable": True}})
     if not r.get("ok"):
         raise HTTPException(500, detail=r.get("error"))
     return MetricsResponse(session_id=session_id, metrics=_metrics(r), done=r["done"])

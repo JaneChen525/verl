@@ -289,6 +289,9 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
         super().__init__(*args, **kwargs)
         tq.init()
         self.background_tasks = set()
+        # Per-worker semaphore removed: global HabitatSlotQueue in recipe layer
+        # handles concurrency bounding across all workers.
+        self._rollout_sem = None
 
     async def generate_sequences(self, batch: TensorDict) -> None:
         """Spawn agent loop for each sample in the batch without waiting for the results."""
@@ -309,10 +312,10 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             sampling_params["top_k"] = config.val_kwargs.top_k
             sampling_params["temperature"] = config.val_kwargs.temperature
 
-        # by default, we assume it's a single turn agent
-        if "agent_name" not in batch:
-            default_agent_loop = config.agent.default_agent_loop
-            batch["agent_name"] = NonTensorData(default_agent_loop)
+        # Force agent_name from config — parquet data may carry a stale value
+        # (e.g. legacy "vln_full_episode_agent") that would bypass the TQ path.
+        default_agent_loop = config.agent.default_agent_loop
+        batch["agent_name"] = NonTensorData(default_agent_loop)
 
         trajectory_info = await get_trajectory_info(batch["global_steps"], batch["index"], validate)
 
@@ -351,14 +354,14 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             if not trajectory["validate"] and not do_sample:
                 apply_greedy_sampling_params(run_sampling_params)
 
-            tasks = []
-            for i in range(n):
-                task = asyncio.create_task(
+            tasks = [
+                asyncio.create_task(
                     self._run_agent_loop(
                         run_sampling_params, trajectory=trajectory, trace=trace, session_id=i, **prompt
                     )
                 )
-                tasks.append(task)
+                for i in range(n)
+            ]
             await asyncio.gather(*tasks)
             await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "finished"})
         except Exception as e:

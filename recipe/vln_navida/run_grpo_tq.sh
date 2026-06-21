@@ -24,6 +24,12 @@ python3 -c "import transfer_queue; print('TQ:', transfer_queue.__version__)"
 # ── vLLM: disable custom all-reduce + symmetric memory (not supported on H100 NVL PCIe topology,
 #    causes "CUDA driver error: operation not permitted" on 2nd TP replica with dp=2)
 export VLLM_DISABLE_CUSTOM_ALL_REDUCE=1
+# ── Global Habitat env slot queue capacity. Bounds total active rollouts across
+#    all workers to match env_server pool_size. Default 32 = 32 Habitat workers.
+export VLN_HABITAT_QUEUE_CAPACITY=${VLN_HABITAT_QUEUE_CAPACITY:-32}
+# ── Reset concurrency gate. Bounds concurrent Habitat scene resets to avoid
+#    overwhelming GPU OpenGL rendering. Default 8 out of 32 active rollouts.
+export VLN_HABITAT_RESET_CAPACITY=${VLN_HABITAT_RESET_CAPACITY:-8}
 # ── vLLM multimodal cache
 export VLLM_MM_INPUT_CACHE_GIB=${VLLM_MM_INPUT_CACHE_GIB:-8}
 # ── Temp dirs: env3 root fs only 46GB, Ray session/spilling defaults to /tmp
@@ -95,11 +101,12 @@ python3 -m verl.trainer.main_ppo_sync \
   actor_rollout_ref.rollout.enforce_eager=True \
   +actor_rollout_ref.rollout.limit_images=9 \
   actor_rollout_ref.rollout.free_cache_engine=True \
-  actor_rollout_ref.rollout.enable_prefix_caching=False \
   actor_rollout_ref.rollout.n=${ROLLOUT_N} \
   actor_rollout_ref.rollout.temperature=${TEMPERATURE} \
   actor_rollout_ref.rollout.max_num_seqs=4 \
   actor_rollout_ref.rollout.max_num_batched_tokens=4096 \
+  actor_rollout_ref.rollout.enable_prefix_caching=False \
+  actor_rollout_ref.rollout.enable_chunked_prefill=False \
   actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=${LOG_PROB_MICRO} \
   actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=False \
   actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${MAX_MODEL_LEN} \

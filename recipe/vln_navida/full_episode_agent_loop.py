@@ -31,6 +31,7 @@ class DecisionGen:
     response_mask: Optional[list[int]] = None
     images: Optional[list[Any]] = None           # PIL images (verl path)
     mm_processor_kwargs: Optional[dict] = None
+    raw_prompt: Optional[str] = None             # pre-tokenization prompt string
 
 
 @dataclass
@@ -65,16 +66,25 @@ async def run_episode(
     group_uid: str,
     trajectory_uid: str,
     max_decisions: int = 64,
-    max_env_steps: int = 20,                         # TEMP: reduced for TQ smoke test
+    max_env_steps: int = 200,                        # P7 target (report/020)
     progress_coef: float = 0.0,
+    skip_reset: bool = False,
 ) -> TrajectoryRecord:
-    """Drive one full episode. env must NOT be reset yet; this function resets it.
+    """Drive one full episode.
+
+    If skip_reset=False (default), resets env here.
+    If skip_reset=True, caller must have already called env.reset().
 
     decide(instruction, b64_buffer) -> DecisionGen
       b64_buffer: list of JPEG base64 strings, [-1] = current frame.
       b64_buffer is accumulated across turns (capped at MAX_ACTION_HISTORY).
     """
-    b64 = await env.reset(extra_info)
+    if skip_reset:
+        assert env.current_jpeg_b64() is not None, "skip_reset=True but env has no observation (forgot to call env.reset?)"
+        assert env.instruction is not None, "skip_reset=True but env.instruction is None"
+        b64 = env.current_jpeg_b64()
+    else:
+        b64 = await env.reset(extra_info)
     b64_buffer = [b64]
     decisions: list[DecisionRecord] = []
     env_steps = 0

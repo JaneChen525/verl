@@ -39,7 +39,7 @@ class VLNEpisodeDataset(Dataset):
             # verl dataloader expects raw_prompt; actual prompt is built online
             "raw_prompt": [{"role": "user", "content": "placeholder"}],
             "data_source": "vln",
-            "agent_name": "vln_full_episode_agent",
+            "agent_name": "vln_full_episode_agent_tq",
             "extra_info": {
                 "episode_id": str(row["episode_id"]),
                 "scene_id": str(row.get("scene_id", "")),

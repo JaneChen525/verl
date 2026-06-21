@@ -5,7 +5,8 @@ rollout worker only talks HTTP.
 Session lifecycle: reset() -> step() x N -> close().
 Images stay as raw env_server JPEG base64 (no re-encode) for byte-identical
 pixels with eval_vllm_navida.py.
-reset() retries 503 (no free worker) with a bound.
+reset() retries 503/timeout/retryable-500 with a deadline.
+step() does NOT retry (action execution is not idempotent).
 """
 import asyncio
 
@@ -34,14 +35,24 @@ class VLNEnv:
         while True:
             try:
                 r = await self._client.post("/v1/sessions", json=body)
-            except (httpx.ReadError, httpx.ConnectError, httpx.RemoteProtocolError) as exc:
+            except (httpx.ReadError, httpx.ConnectError, httpx.RemoteProtocolError,
+                    httpx.TimeoutException) as exc:
                 if asyncio.get_event_loop().time() < deadline:
                     await asyncio.sleep(self._reset_retry_s)
                     continue
                 raise
-            if r.status_code == 503 and asyncio.get_event_loop().time() < deadline:
+            if r.status_code in (503, 504) and asyncio.get_event_loop().time() < deadline:
                 await asyncio.sleep(self._reset_retry_s)
                 continue
+            if r.status_code == 500 and asyncio.get_event_loop().time() < deadline:
+                try:
+                    body = r.json()
+                    retryable = body.get("detail", {}).get("error", {}).get("retryable", False)
+                except Exception:
+                    retryable = False
+                if retryable:
+                    await asyncio.sleep(self._reset_retry_s)
+                    continue
             r.raise_for_status()
             break
         d = r.json()

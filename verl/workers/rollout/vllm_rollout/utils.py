@@ -278,6 +278,12 @@ class SuppressSignalInThread:
         signal.signal = self.original_signal
 
 
+_VLLM_BOOLEAN_OPTIONAL_KEYS = frozenset({
+    "enable_prefix_caching",
+    "enable_chunked_prefill",
+})
+
+
 def build_cli_args_from_config(config: dict[str, Any]) -> list[str]:
     """
     Convert a config dictionary to CLI arguments for vLLM server.
@@ -285,7 +291,7 @@ def build_cli_args_from_config(config: dict[str, Any]) -> list[str]:
     Handles different value types appropriately:
     - None: skipped
     - bool True: adds '--key'
-    - bool False: skipped
+    - bool False: adds '--no-key' for BooleanOptionalAction keys, skipped otherwise
     - list: expands to '--key item1 item2 ...'
     - empty list: skipped (vLLM uses nargs="+" which requires at least one value)
     - dict: JSON serialized
@@ -304,6 +310,8 @@ def build_cli_args_from_config(config: dict[str, Any]) -> list[str]:
         if isinstance(v, bool):
             if v:
                 cli_args.append(f"--{k}")
+            elif k in _VLLM_BOOLEAN_OPTIONAL_KEYS:
+                cli_args.append(f"--no-{k}")
         elif isinstance(v, list):
             if not v:
                 # Skip empty lists - vLLM uses nargs="+" which requires at least one value

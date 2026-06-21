@@ -114,6 +114,13 @@ def construct_minimal_padding_template(
     )
     if "multi_modal_inputs" in template_sample:
         template_sample["multi_modal_inputs"] = {}
+    # If source uses flattened mRoPE, generate matching flat padding position_ids
+    _pos_ch = template_sample.get("_position_ids_channels")
+    if _pos_ch is not None:
+        channels = int(_pos_ch.item()) if isinstance(_pos_ch, torch.Tensor) else int(_pos_ch)
+        seq_len = position_ids.numel()
+        flat_pos = position_ids.unsqueeze(0).expand(channels, -1).transpose(0, 1).contiguous().view(-1)
+        template_sample["position_ids"] = flat_pos
     if routed_experts is not None:
         template_sample["routed_experts"] = routed_experts
     else:

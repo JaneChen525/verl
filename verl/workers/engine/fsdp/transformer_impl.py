@@ -949,7 +949,12 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     # Reconstruct flattened mRoPE: (total_tokens*C,) → (C, 1, total_tokens)
                     channels = int(_pos_channels[0].item()) if isinstance(_pos_channels, torch.Tensor) else int(_pos_channels)
                     flat_vals = position_ids.values()  # (total_tokens * C,)
-                    total_tokens = flat_vals.numel() // channels
+                    input_nnz = input_ids.values().numel()
+                    expected = input_nnz * channels
+                    assert flat_vals.numel() == expected, (
+                        f"flat mRoPE invariant violated: pos={flat_vals.numel()} != input={input_nnz}*{channels}={expected}"
+                    )
+                    total_tokens = input_nnz
                     position_ids_rmpad = flat_vals.view(total_tokens, channels).transpose(0, 1).contiguous().unsqueeze(1)
                 elif position_ids.dim() == 3:
                     position_ids_rmpad = position_ids.values().unsqueeze(1)  # (4, 1, total_nnz)

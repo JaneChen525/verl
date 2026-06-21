@@ -20,9 +20,11 @@ from PIL import Image
 import torch
 
 from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutput, register
+from verl.utils.chat_template import apply_chat_template as hf_apply_chat_template
+from verl.utils.model import compute_position_id_with_mask
 from verl.utils.profiler import simple_timer
 from verl.utils.rollout_trace import rollout_trace_op
-from verl.utils.tokenizer import build_multimodal_processor_inputs
+from verl.utils.tokenizer import build_multimodal_processor_inputs, get_processor_token_id, normalize_token_ids
 from verl.workers.rollout.replica import TokenOutput
 
 from recipe.vln_navida.env_pool import VLNEnv
@@ -33,6 +35,7 @@ from recipe.vln_navida.full_episode_agent_loop import (
     run_episode,
 )
 from recipe.vln_navida.prompt import build_navida_messages
+from recipe.vln_navida.slot_queue import get_slot_queue
 
 
 def _b64_to_pil(b64: str) -> Image.Image:
@@ -176,6 +179,37 @@ class VLNFullEpisodeAgentLoopTQ(AgentLoopBase):
         self.progress_coef = float(os.environ.get("VLN_PROGRESS_COEF", progress_coef))
         self.response_length = self.rollout_config.response_length
 
+    def _compute_position_ids(self, input_ids, attention_mask, multi_modal_inputs):
+        if self.processor is None:
+            return compute_position_id_with_mask(attention_mask)
+
+        multi_modal_kwargs = {
+            "image_grid_thw": multi_modal_inputs.get("image_grid_thw"),
+            "video_grid_thw": multi_modal_inputs.get("video_grid_thw"),
+        }
+        if multi_modal_inputs.pop("mm_token_type_ids", None) is not None:
+            mm_token_type_ids = torch.zeros_like(input_ids)
+            image_token_id = get_processor_token_id(self.processor, "image")
+            video_token_id = get_processor_token_id(self.processor, "video")
+            if image_token_id is not None:
+                mm_token_type_ids[0][input_ids[0] == image_token_id] = 1
+            if video_token_id is not None:
+                mm_token_type_ids[0][input_ids[0] == video_token_id] = 2
+            multi_modal_kwargs["mm_token_type_ids"] = mm_token_type_ids
+
+        vision_position_ids, _ = self.processor.get_rope_index(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            **multi_modal_kwargs,
+        )
+        vision_position_ids = vision_position_ids.transpose(0, 1)
+
+        valid_mask = attention_mask[0].bool()
+        text_position_ids = torch.ones((1, len(input_ids[0])), dtype=torch.long)
+        text_position_ids[0, valid_mask] = torch.arange(valid_mask.sum().item())
+        text_position_ids = text_position_ids.unsqueeze(0)
+        return torch.cat((text_position_ids, vision_position_ids), dim=1)
+
     def _precompute_mm_and_position(self, dec, r_ids_truncated):
         """Pre-compute multi_modal_inputs and position_ids for one decision
         using the original images (not decode→re-process)."""
@@ -186,10 +220,12 @@ class VLNFullEpisodeAgentLoopTQ(AgentLoopBase):
 
         mm_inputs = {}
         if dec.gen.images and self.processor is not None:
+            if dec.gen.raw_prompt is None:
+                raise RuntimeError("raw_prompt missing — verl_decide must store it for multimodal precompute")
             mm_kwargs = dec.gen.mm_processor_kwargs or {}
             mm_result = build_multimodal_processor_inputs(
                 self.processor,
-                text=[self.tokenizer.decode(dec.gen.prompt_ids, skip_special_tokens=False)],
+                text=[dec.gen.raw_prompt],
                 images=dec.gen.images,
                 mm_processor_kwargs=mm_kwargs,
             )
@@ -206,11 +242,6 @@ class VLNFullEpisodeAgentLoopTQ(AgentLoopBase):
             input_ids.unsqueeze(0), attention_mask.unsqueeze(0), mm_inputs
         ).squeeze(0)
 
-        print(f"[DEBUG precompute] input_ids={input_ids.shape}, "
-              f"mm_inputs keys={list(mm_inputs.keys())}, "
-              f"image_grid_thw={mm_inputs.get('image_grid_thw', 'NONE')}, "
-              f"position_ids={position_ids.shape}")
-
         return mm_inputs, position_ids
 
     @rollout_trace_op
@@ -225,9 +256,25 @@ class VLNFullEpisodeAgentLoopTQ(AgentLoopBase):
             pil_images = [_b64_to_pil(b) for b in b64_buffer]
             messages, images = build_navida_messages(instruction, pil_images)
             mm_processor_kwargs = self._get_mm_processor_kwargs(None)
-            prompt_ids = await self.apply_chat_template(
-                messages, images=images, mm_processor_kwargs=mm_processor_kwargs,
+
+            raw_prompt = await self.loop.run_in_executor(
+                None,
+                lambda: hf_apply_chat_template(
+                    self.processor,
+                    messages,
+                    add_generation_prompt=True,
+                    tokenize=False,
+                    **self.apply_chat_template_kwargs,
+                ),
             )
+            model_inputs = build_multimodal_processor_inputs(
+                self.processor,
+                text=[raw_prompt],
+                images=images,
+                mm_processor_kwargs=mm_processor_kwargs,
+            )
+            prompt_ids = normalize_token_ids(model_inputs.pop("input_ids"))
+
             with simple_timer("generate_sequences", metrics):
                 output: TokenOutput = await self.server_manager.generate(
                     request_id=uuid4().hex,
@@ -245,18 +292,31 @@ class VLNFullEpisodeAgentLoopTQ(AgentLoopBase):
                 response_mask=[1] * len(output.token_ids),
                 images=images,
                 mm_processor_kwargs=mm_processor_kwargs,
+                raw_prompt=raw_prompt,
             )
 
-        env = VLNEnv(self.env_server_url)
+        slot_key = f"{uid}:{kwargs.get('session_id', 0)}"
+        queue = get_slot_queue()
+        await queue.acquire.remote(slot_key)
         try:
-            traj: TrajectoryRecord = await run_episode(
-                env, extra, verl_decide,
-                group_uid=uid,
-                trajectory_uid=f"{uid}#{uuid4().hex[:8]}",
-                progress_coef=self.progress_coef,
-            )
+            env = VLNEnv(self.env_server_url)
+            try:
+                await queue.acquire_reset.remote(slot_key)
+                try:
+                    await env.reset(extra)
+                finally:
+                    await queue.release_reset.remote(slot_key)
+                traj: TrajectoryRecord = await run_episode(
+                    env, extra, verl_decide,
+                    group_uid=uid,
+                    trajectory_uid=f"{uid}#{uuid4().hex[:8]}",
+                    progress_coef=self.progress_coef,
+                    skip_reset=True,
+                )
+            finally:
+                await env.close()
         finally:
-            await env.close()
+            await queue.release.remote(slot_key)
 
         outputs: list[AgentLoopOutput] = []
         num_decisions = len(traj.decisions)

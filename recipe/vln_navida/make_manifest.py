@@ -30,7 +30,7 @@ def episodes_to_parquet(episodes: list[dict], out_path: Path):
         rows.append({
             "data_source": "vln",
             "prompt": [{"role": "user", "content": "placeholder"}],
-            "agent_name": "vln_full_episode_agent",
+            "agent_name": "vln_full_episode_agent_tq",
             "extra_info": {
                 "episode_id": str(ep["episode_id"]),
                 "scene_id": str(ep.get("scene_id", "")),
