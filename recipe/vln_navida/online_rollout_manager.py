@@ -149,14 +149,26 @@ class VLNOnlineRolloutManager(AgentLoopManager):
         remainder = len(all_rows) % pad_multiple
         if remainder:
             pad_count = pad_multiple - remainder
-            dummy = {k: all_rows[0][k] for k in all_rows[0]}
-            dummy["response_mask"] = [0]
-            dummy["trajectory_reward"] = 0.0
-            dummy["image_buffer_ref"] = None
-            dummy["image_indices"] = None
-            dummy["raw_prompt"] = None
-            for _ in range(pad_count):
-                all_rows.append(dummy)
+            pad_token_id = int(meta_info.get("pad_token_id", 0) or 0)
+            for pad_idx in range(pad_count):
+                all_rows.append({
+                    "prompt_ids": [pad_token_id],
+                    "response_ids": [],
+                    "response_logprobs": None,
+                    "response_mask": [],
+                    "trajectory_reward": 0.0,
+                    "decision_loss_weight": 0.0,
+                    "turn_id": -1,
+                    "action_text": "",
+                    "image_buffer_ref": None,
+                    "image_indices": [],
+                    "raw_prompt": "",
+                    "mm_processor_kwargs": {},
+                    "uid": f"__vln_padding__{pad_idx}",
+                    "trajectory_uid": f"__vln_padding__{pad_idx}",
+                    "is_stop_action": False,
+                    "is_padding": True,
+                })
 
         n = len(all_rows)
         prompts_t = torch.zeros(n, prompt_length, dtype=torch.long)
