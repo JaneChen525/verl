@@ -13,13 +13,21 @@ This manager inherits AgentLoopManager and overrides generate_sequences:
 The trainer receives a batch where each row is an INDEPENDENT NaVIDA decision, and
 uid groups all decisions of the same episode start for trajectory-level GRPO (§10).
 """
+import base64
+import io
+
 import numpy as np
 import torch
+from PIL import Image
 
 from verl.experimental.agent_loop.agent_loop import AgentLoopManager
 from verl.protocol import DataProto
 from verl.utils.ray_utils import auto_await
 from verl.utils.tokenizer import build_multimodal_processor_inputs
+
+
+def _b64_to_pil(b64: str) -> Image.Image:
+    return Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGB")
 
 # ── Monkey-patch DataProto.union to handle VLN flatten ────────────────────────
 # When VLNOnlineRolloutManager returns a flattened batch (M decision rows) and
@@ -71,16 +79,9 @@ class VLNOnlineRolloutManager(AgentLoopManager):
 
         Returns (all_rows: list[dict], traj_rewards: list[float], traj_successes: list[float]).
         """
-        print(f"[VLN debug] non_tensor_batch keys: {list(one_to_one.non_tensor_batch.keys())}")
         trajectories = one_to_one.non_tensor_batch.get("trajectory")
         if trajectories is None:
-            print("[VLN debug] 'trajectory' not found, trying 'tool_extra_fields'")
-            tool_extra = one_to_one.non_tensor_batch.get("tool_extra_fields")
-            if tool_extra is not None:
-                trajectories = [ef.get("trajectory") for ef in tool_extra if ef is not None]
-                trajectories = [t for t in trajectories if t is not None]
-            if not trajectories:
-                return [], [], []
+            return [], [], []
 
         all_rows = []
         traj_rewards = []
@@ -93,6 +94,7 @@ class VLNOnlineRolloutManager(AgentLoopManager):
             reward = traj_data["reward"]
             num_decisions = traj_data["num_decisions"]
             decisions = traj_data.get("decisions", [])
+            image_buffer = traj_data.get("image_buffer", [])
             traj_rewards.append(reward)
             metrics = traj_data.get("metrics", {})
             traj_successes.append(float(metrics.get("success", 0.0)))
@@ -103,7 +105,9 @@ class VLNOnlineRolloutManager(AgentLoopManager):
                     "response_ids": dec["response_ids"],
                     "response_logprobs": dec.get("response_logprobs"),
                     "response_mask": dec["response_mask"],
-                    "images": dec.get("images"),
+                    "image_buffer": image_buffer,
+                    "image_indices": dec.get("image_indices"),
+                    "raw_prompt": dec.get("raw_prompt"),
                     "mm_processor_kwargs": dec.get("mm_processor_kwargs"),
                     "turn_id": dec["turn_id"],
                     "action_text": dec.get("action_text", ""),
@@ -133,14 +137,22 @@ class VLNOnlineRolloutManager(AgentLoopManager):
             )
         except Exception:
             micro_bs = 2
-        pad_multiple = fsdp_size * micro_bs
+        try:
+            ppo_mbs = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
+            rollout_n = self.config.actor_rollout_ref.rollout.n
+        except Exception:
+            ppo_mbs, rollout_n = 32, 4
+        pad_multiple = max(fsdp_size * micro_bs, ppo_mbs * rollout_n)
+        real_decision_count = len(all_rows)
         remainder = len(all_rows) % pad_multiple
         if remainder:
             pad_count = pad_multiple - remainder
             dummy = {k: all_rows[0][k] for k in all_rows[0]}
             dummy["response_mask"] = [0]
             dummy["trajectory_reward"] = 0.0
-            dummy["images"] = None
+            dummy["image_buffer"] = None
+            dummy["image_indices"] = None
+            dummy["raw_prompt"] = None
             for _ in range(pad_count):
                 all_rows.append(dummy)
 
@@ -176,15 +188,17 @@ class VLNOnlineRolloutManager(AgentLoopManager):
             pad = input_ids.shape[1] - non_pad
             position_ids[i, pad:] = torch.arange(non_pad)
 
-        tokenizer, processor = self._get_tokenizer_and_processor()
+        _, processor = self._get_tokenizer_and_processor()
         mm_inputs_list = []
         for i, row in enumerate(all_rows):
-            images = row.get("images")
+            image_buffer = row.get("image_buffer")
+            image_indices = row.get("image_indices")
+            raw_prompt = row.get("raw_prompt")
             mm_kwargs = row.get("mm_processor_kwargs") or {}
-            if processor is not None and images:
-                text = tokenizer.decode(input_ids[i], skip_special_tokens=True)
+            if processor is not None and image_buffer and image_indices and raw_prompt:
+                pil_images = [_b64_to_pil(image_buffer[idx]) for idx in image_indices]
                 mm = build_multimodal_processor_inputs(
-                    processor, text=[text], images=images, mm_processor_kwargs=mm_kwargs,
+                    processor, text=[raw_prompt], images=pil_images, mm_processor_kwargs=mm_kwargs,
                 )
                 mm.pop("input_ids", None)
                 mm.pop("attention_mask", None)
@@ -195,6 +209,7 @@ class VLNOnlineRolloutManager(AgentLoopManager):
                         image_grid_thw[:, 1] * image_grid_thw[:, 2], image_grid_thw[:, 0]
                     )
                 mm_inputs_list.append(mm)
+                del pil_images
             else:
                 mm_inputs_list.append({})
 
@@ -228,7 +243,7 @@ class VLNOnlineRolloutManager(AgentLoopManager):
             r = np.array(traj_rewards)
             s = np.array(traj_successes)
             print(f"[VLN rollout] {len(traj_rewards)} trajectories, "
-                  f"{len(all_rows)} decisions (padded {n}), "
+                  f"{real_decision_count} decisions (padded {n}), "
                   f"SR={s.mean():.1%}, reward={r.mean():.3f}±{r.std():.3f}")
             output.meta_info["vln_metrics"] = {
                 "vln/traj_reward/mean": float(r.mean()),
@@ -237,7 +252,7 @@ class VLNOnlineRolloutManager(AgentLoopManager):
                 "vln/traj_reward/min": float(r.min()),
                 "vln/traj_sr": float(s.mean()),
                 "vln/traj_count": len(traj_rewards),
-                "vln/avg_decisions_per_traj": len(all_rows) / len(traj_rewards),
+                "vln/avg_decisions_per_traj": real_decision_count / len(traj_rewards),
             }
 
         return output

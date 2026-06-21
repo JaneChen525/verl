@@ -31,14 +31,23 @@ def uniform_sample_with_ends(data: list, n: int) -> list:
 
 
 def build_navida_messages(instruction: str, pil_images: list, k_history: int = K_HISTORY):
-    """verl path: returns (messages_with_image_markers, ordered_pil_images).
+    """verl path: returns (messages, ordered_pil_images, image_indices).
 
     pil_images[-1] = current frame (PIL), pil_images[:-1] = history.
     Messages use {"type": "image"} markers; caller passes images to apply_chat_template.
+    image_indices: positions in the original pil_images list (for buffer-based replay).
     """
     current = pil_images[-1]
-    historic = uniform_sample_with_ends(pil_images[:-1], k_history) if len(pil_images) > 1 else [current]
+    num_frames = len(pil_images)
+    current_index = num_frames - 1
+    if num_frames > 1:
+        historic_indices = uniform_sample_with_ends(list(range(num_frames - 1)), k_history)
+        historic = [pil_images[i] for i in historic_indices]
+    else:
+        historic_indices = [current_index]
+        historic = [current]
     images = list(historic) + [current]
+    image_indices = historic_indices + [current_index]
     content = [{"type": "text", "text": NAVIDA_INTRO}]
     content += [{"type": "image"} for _ in historic]
     content.append({"type": "text", "text": NAVIDA_BRIDGE})
@@ -48,7 +57,7 @@ def build_navida_messages(instruction: str, pil_images: list, k_history: int = K
         {"role": "system", "content": [{"type": "text", "text": SYSTEM_PROMPT}]},
         {"role": "user", "content": content},
     ]
-    return messages, images
+    return messages, images, image_indices
 
 
 def build_navida_messages_b64(instruction: str, b64_buffer: list, k_history: int = K_HISTORY):

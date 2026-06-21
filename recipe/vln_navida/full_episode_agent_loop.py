@@ -29,8 +29,10 @@ class DecisionGen:
     response_ids: Optional[list[int]] = None
     response_logprobs: Optional[list[float]] = None
     response_mask: Optional[list[int]] = None
-    images: Optional[list[Any]] = None           # PIL images (verl path)
+    images: Optional[list[Any]] = None           # PIL images (rollout inference only)
     mm_processor_kwargs: Optional[dict] = None
+    image_indices: Optional[list[int]] = None    # indices into episode b64_buffer
+    raw_prompt: Optional[str] = None             # pre-tokenization prompt string
 
 
 @dataclass
@@ -55,12 +57,13 @@ class TrajectoryRecord:
     reward: float
     metrics: dict
     decisions: list[DecisionRecord] = field(default_factory=list)
+    image_buffer: list[str] = field(default_factory=list)
 
 
 async def run_episode(
     env,                                              # VLNEnv instance (already reset externally, OR reset here)
     extra_info: dict,
-    decide: Callable[[str, list[str]], Awaitable[DecisionGen]],
+    decide: Callable[..., Awaitable[DecisionGen]],
     *,
     group_uid: str,
     trajectory_uid: str,
@@ -75,19 +78,19 @@ async def run_episode(
       b64_buffer is accumulated across turns (capped at MAX_ACTION_HISTORY).
     """
     b64 = await env.reset(extra_info)
-    b64_buffer = [b64]
+    all_frames: list[str] = [b64]
+    history_window: list[str] = [b64]
     decisions: list[DecisionRecord] = []
     env_steps = 0
     done = False
 
     while not done and len(decisions) < max_decisions and env_steps < max_env_steps:
-        gen = await decide(env.instruction, b64_buffer)
+        gen = await decide(env.instruction, history_window, all_frames)
         parsed = parse_navida_action(gen.action_text)
         chunk = to_atomic_chunk(parsed)
         step_before = env_steps
 
         if not chunk:
-            # model emitted no valid action; record as invalid decision and stop
             decisions.append(DecisionRecord(
                 turn_id=len(decisions), action_text=gen.action_text,
                 parsed_actions=parsed, atomic_chunk=[], env_step_before=env_steps,
@@ -97,9 +100,11 @@ async def run_episode(
 
         for atomic in chunk:
             resp = await env.step([atomic])
-            b64_buffer.append(env.current_jpeg_b64())
-            if len(b64_buffer) > MAX_ACTION_HISTORY:
-                b64_buffer = b64_buffer[1:]
+            frame = env.current_jpeg_b64()
+            all_frames.append(frame)
+            history_window.append(frame)
+            if len(history_window) > MAX_ACTION_HISTORY:
+                history_window = history_window[1:]
             env_steps += 1
             done = resp["done"]
             if done:
@@ -123,4 +128,5 @@ async def run_episode(
         reward=compute_trajectory_reward(metrics, progress_coef=progress_coef),
         metrics=metrics,
         decisions=decisions,
+        image_buffer=all_frames,
     )

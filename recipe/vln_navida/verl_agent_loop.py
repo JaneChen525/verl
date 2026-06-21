@@ -15,6 +15,7 @@ from uuid import uuid4
 from PIL import Image
 
 from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutput, register
+from verl.utils.chat_template import apply_chat_template as verl_apply_chat_template
 from verl.utils.profiler import simple_timer
 from verl.utils.rollout_trace import rollout_trace_op
 from verl.workers.rollout.replica import TokenOutput
@@ -54,10 +55,23 @@ class VLNFullEpisodeAgentLoop(AgentLoopBase):
         metrics: dict = {}
 
         # Build verl-native decide closure (uses server_manager + apply_chat_template)
-        async def verl_decide(instruction: str, b64_buffer: list[str]) -> DecisionGen:
+        async def verl_decide(instruction: str, b64_buffer: list[str], all_frames: list[str]) -> DecisionGen:
             pil_images = [_b64_to_pil(b) for b in b64_buffer]
-            messages, images = build_navida_messages(instruction, pil_images)
+            messages, images, image_indices = build_navida_messages(instruction, pil_images)
+            # Convert window-relative indices to all_frames absolute indices
+            offset = len(all_frames) - len(b64_buffer)
+            image_indices = [idx + offset for idx in image_indices]
             mm_processor_kwargs = self._get_mm_processor_kwargs(None)
+            raw_prompt = await self.loop.run_in_executor(
+                None,
+                lambda: verl_apply_chat_template(
+                    self.processor or self.tokenizer,
+                    messages,
+                    add_generation_prompt=True,
+                    tokenize=False,
+                    **self.apply_chat_template_kwargs,
+                ),
+            )
             prompt_ids = await self.apply_chat_template(
                 messages, images=images, mm_processor_kwargs=mm_processor_kwargs,
             )
@@ -78,6 +92,8 @@ class VLNFullEpisodeAgentLoop(AgentLoopBase):
                 response_mask=[1] * len(output.token_ids),
                 images=images,
                 mm_processor_kwargs=mm_processor_kwargs,
+                image_indices=image_indices,
+                raw_prompt=raw_prompt,
             )
 
         # Drive full episode
@@ -120,6 +136,7 @@ class VLNFullEpisodeAgentLoop(AgentLoopBase):
             "reward": traj.reward,
             "metrics": traj.metrics,
             "num_decisions": len(traj.decisions),
+            "image_buffer": traj.image_buffer,
             "decisions": [
                 {
                     "turn_id": d.turn_id,
@@ -127,13 +144,14 @@ class VLNFullEpisodeAgentLoop(AgentLoopBase):
                     "response_ids": d.gen.response_ids,
                     "response_logprobs": d.gen.response_logprobs,
                     "response_mask": d.gen.response_mask,
-                    "images": d.gen.images,
+                    "image_indices": d.gen.image_indices,
+                    "raw_prompt": d.gen.raw_prompt,
                     "mm_processor_kwargs": d.gen.mm_processor_kwargs,
                     "action_text": d.action_text,
                     "is_stop_action": d.is_stop_action,
                 }
                 for d in traj.decisions
-                if d.gen.prompt_ids is not None  # skip invalid decisions without token data
+                if d.gen.prompt_ids is not None
             ],
         }
 
