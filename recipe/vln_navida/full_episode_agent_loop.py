@@ -65,7 +65,7 @@ async def run_episode(
     group_uid: str,
     trajectory_uid: str,
     max_decisions: int = 64,
-    max_env_steps: int = 400,                        # matches vln_r2r.yaml max_episode_steps
+    max_env_steps: int = 200,                        # P7 target (report/020)
     progress_coef: float = 0.0,
 ) -> TrajectoryRecord:
     """Drive one full episode. env must NOT be reset yet; this function resets it.

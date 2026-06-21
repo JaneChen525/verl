@@ -20,6 +20,10 @@ export VLN_ROLLOUT_WINDOW=${ROLLOUT_WINDOW:-8}
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 WORLDMODEL=${WORLDMODEL:-/workspace/WorldModel}
+# ── Temp dirs: env3 root fs only 46GB, redirect Ray/wandb temp to data volume
+export TMPDIR=${TMPDIR:-${WORLDMODEL}/../tmp}
+export RAY_TMPDIR=${RAY_TMPDIR:-${TMPDIR}/ray}
+mkdir -p "${TMPDIR}" "${RAY_TMPDIR}"
 export PYTHONPATH=${WORLDMODEL}/vln/reinforcement_learning:${WORLDMODEL}:${WORLDMODEL}/vln:${PYTHONPATH:-}
 
 MODEL_PATH=${MODEL_PATH:-${WORLDMODEL}/checkpoints/Qwen3VL_4B_R2R_RxR_swift}

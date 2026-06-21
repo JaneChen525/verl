@@ -71,9 +71,16 @@ class VLNOnlineRolloutManager(AgentLoopManager):
 
         Returns (all_rows: list[dict], traj_rewards: list[float], traj_successes: list[float]).
         """
+        print(f"[VLN debug] non_tensor_batch keys: {list(one_to_one.non_tensor_batch.keys())}")
         trajectories = one_to_one.non_tensor_batch.get("trajectory")
         if trajectories is None:
-            return [], [], []
+            print("[VLN debug] 'trajectory' not found, trying 'tool_extra_fields'")
+            tool_extra = one_to_one.non_tensor_batch.get("tool_extra_fields")
+            if tool_extra is not None:
+                trajectories = [ef.get("trajectory") for ef in tool_extra if ef is not None]
+                trajectories = [t for t in trajectories if t is not None]
+            if not trajectories:
+                return [], [], []
 
         all_rows = []
         traj_rewards = []
@@ -223,6 +230,15 @@ class VLNOnlineRolloutManager(AgentLoopManager):
             print(f"[VLN rollout] {len(traj_rewards)} trajectories, "
                   f"{len(all_rows)} decisions (padded {n}), "
                   f"SR={s.mean():.1%}, reward={r.mean():.3f}±{r.std():.3f}")
+            output.meta_info["vln_metrics"] = {
+                "vln/traj_reward/mean": float(r.mean()),
+                "vln/traj_reward/std": float(r.std()),
+                "vln/traj_reward/max": float(r.max()),
+                "vln/traj_reward/min": float(r.min()),
+                "vln/traj_sr": float(s.mean()),
+                "vln/traj_count": len(traj_rewards),
+                "vln/avg_decisions_per_traj": len(all_rows) / len(traj_rewards),
+            }
 
         return output
 

@@ -1425,7 +1425,9 @@ class RayPPOTrainer:
                         timing_raw.update(combined_gen_output.meta_info["timing"])
                         combined_gen_output.meta_info.pop("timing", None)
 
-                    gen_batch_output = combined_gen_output.slice(0, num_sampled_prompts)
+                    # VLN rollout manager may return flattened decision-level batch.
+                    # Do not slice back to episode-level sample count.
+                    gen_batch_output = combined_gen_output
                     if "__do_sample__" in gen_batch_output.non_tensor_batch:
                         gen_batch_output.pop(non_tensor_batch_keys=["__do_sample__"])
 
@@ -1668,6 +1670,10 @@ class RayPPOTrainer:
                 )
                 # collect metrics
                 metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
+                # VLN trajectory-level metrics (episode-level, not decision-level)
+                vln_metrics = batch.meta_info.get("vln_metrics")
+                if vln_metrics:
+                    metrics.update(vln_metrics)
                 # GDPO per-component reward metrics
                 gdpo_reward_keys = self.config.algorithm.get("gdpo_reward_keys", None)
                 if gdpo_reward_keys and self.config.algorithm.adv_estimator in ("gdpo", AdvantageEstimator.GDPO):
