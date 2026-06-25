@@ -17,6 +17,8 @@ set -xeuo pipefail
 export VLLM_MM_INPUT_CACHE_GIB=${VLLM_MM_INPUT_CACHE_GIB:-8}
 # ── Rollout window: max concurrent rollouts per generate_sequences call
 export VLN_ROLLOUT_WINDOW=${ROLLOUT_WINDOW:-8}
+# ── Rollout scheduler: "window" = fixed barrier (default), "sliding" = rolling queue
+export VLN_ROLLOUT_SCHEDULER=${ROLLOUT_SCHEDULER:-window}
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 WORLDMODEL=${WORLDMODEL:-/workspace/WorldModel}

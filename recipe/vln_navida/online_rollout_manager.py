@@ -13,8 +13,10 @@ This manager inherits AgentLoopManager and overrides generate_sequences:
 The trainer receives a batch where each row is an INDEPENDENT NaVIDA decision, and
 uid groups all decisions of the same episode start for trajectory-level GRPO (§10).
 """
+import asyncio
 import base64
 import io
+import os
 
 import numpy as np
 import ray
@@ -64,7 +66,6 @@ class VLNOnlineRolloutManager(AgentLoopManager):
 
     def _get_rollout_window(self, total: int) -> int:
         """Read VLN_ROLLOUT_WINDOW from env var; default = total (no windowing)."""
-        import os
         w = os.environ.get("VLN_ROLLOUT_WINDOW")
         if w is not None:
             try:
@@ -253,6 +254,10 @@ class VLNOnlineRolloutManager(AgentLoopManager):
     async def generate_sequences(self, prompts: DataProto) -> DataProto:
         window_size = self._get_rollout_window(len(prompts))
         total = len(prompts)
+        scheduler = os.environ.get("VLN_ROLLOUT_SCHEDULER", "window").lower()
+
+        if scheduler == "sliding":
+            return await self._generate_sequences_sliding(prompts, window_size, total)
 
         if window_size >= total:
             # No windowing: original single-batch path
@@ -262,7 +267,7 @@ class VLNOnlineRolloutManager(AgentLoopManager):
                 return one_to_one
             return self._build_output(rows, rewards, successes, one_to_one.meta_info)
 
-        # Windowed path: process rollouts in chunks
+        # Fixed-window path: process rollouts in chunks
         all_rows = []
         all_rewards = []
         all_successes = []
@@ -291,3 +296,99 @@ class VLNOnlineRolloutManager(AgentLoopManager):
             return one_to_one
 
         return self._build_output(all_rows, all_rewards, all_successes, last_meta_info)
+
+    async def _generate_sequences_sliding(self, prompts, max_concurrent, total):
+        """Bounded rolling queue: index queue + fixed worker loops, no barrier.
+
+        Concurrency = min(VLN_ROLLOUT_WINDOW, num_workers, total).
+        Workers pull episodes from a shared index queue; as each finishes,
+        the next starts immediately — no window barrier.
+        """
+        concurrency = min(max_concurrent, len(self.agent_loop_workers), total)
+        active_workers = self.agent_loop_workers[:concurrency]
+
+        index_queue = asyncio.Queue()
+        for i in range(total):
+            index_queue.put_nowait(i)
+
+        results = [None] * total
+        all_metrics = []
+        output_meta = {}
+        completed = [0]
+
+        async def worker_loop(worker):
+            while True:
+                try:
+                    idx = index_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+
+                single = prompts[idx:idx + 1]
+                if hasattr(prompts, "meta_info"):
+                    single.meta_info = prompts.meta_info
+
+                out = await worker.generate_sequences.remote(single)
+                rows, rewards, successes = self._extract_decisions(out)
+                results[idx] = (rows, rewards, successes)
+
+                worker_metrics = out.meta_info.get("metrics", [])
+                all_metrics.extend(worker_metrics)
+                for k, v in out.meta_info.items():
+                    if k != "metrics" and k not in output_meta:
+                        output_meta[k] = v
+
+                completed[0] += 1
+                if completed[0] % concurrency == 0 or completed[0] == total:
+                    print(f"[VLN rollout] sliding: {completed[0]}/{total} episodes done")
+
+        print(f"[VLN rollout] sliding mode: {total} episodes, concurrency={concurrency}")
+        await asyncio.gather(*(worker_loop(w) for w in active_workers))
+
+        all_rows, all_rewards, all_successes = [], [], []
+        for res in results:
+            if res:
+                all_rows.extend(res[0])
+                all_rewards.extend(res[1])
+                all_successes.extend(res[2])
+
+        if not all_rows:
+            raise RuntimeError("[VLN rollout] sliding: all episodes returned empty decisions")
+
+        meta_info = dict(prompts.meta_info) if hasattr(prompts, "meta_info") else {}
+        meta_info.update(output_meta)
+        output = self._build_output(all_rows, all_rewards, all_successes, meta_info)
+        output.meta_info["timing"] = self._aggregate_timing(all_metrics)
+        return output
+
+    def _aggregate_timing(self, all_metrics):
+        """Aggregate per-episode metrics into timing dict (mirrors AgentLoopManager._performance_metrics)."""
+        timing = {}
+        if not all_metrics:
+            return timing
+
+        flat = [m for chunk in all_metrics for m in (chunk if isinstance(chunk, list) else [chunk])]
+        if not flat:
+            return timing
+
+        t_gen = np.array([m["generate_sequences"] for m in flat])
+        t_tool = np.array([m["tool_calls"] for m in flat])
+        t_score = np.array([m["compute_score"] for m in flat])
+        num_preempted = np.array([m["num_preempted"] for m in flat])
+
+        for prefix, arr in [
+            ("agent_loop/generate_sequences", t_gen),
+            ("agent_loop/tool_calls", t_tool),
+            ("agent_loop/compute_score", t_score),
+            ("agent_loop/num_preempted", num_preempted),
+        ]:
+            timing[f"{prefix}/min"] = float(arr.min())
+            timing[f"{prefix}/max"] = float(arr.max())
+            timing[f"{prefix}/mean"] = float(arr.mean())
+
+        slowest = int(np.argmax(t_gen + t_tool + t_score))
+        timing["agent_loop/slowest/generate_sequences"] = float(t_gen[slowest])
+        timing["agent_loop/slowest/tool_calls"] = float(t_tool[slowest])
+        timing["agent_loop/slowest/compute_score"] = float(t_score[slowest])
+        timing["agent_loop/slowest/num_preempted"] = float(num_preempted[slowest])
+
+        return timing
