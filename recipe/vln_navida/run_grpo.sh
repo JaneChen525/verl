@@ -71,8 +71,10 @@ SAVE_FREQ=${SAVE_FREQ:-10}
 TEST_FREQ=${TEST_FREQ:--1}
 
 # ── Launch ────────────────────────────────────────────────────────────────────
+ADV_ESTIMATOR=${ADV_ESTIMATOR:-grpo}
+
 python3 -m verl.trainer.main_ppo \
-  algorithm.adv_estimator=grpo \
+  algorithm.adv_estimator=${ADV_ESTIMATOR} \
   algorithm.use_kl_in_reward=False \
   data.train_files="${TRAIN_FILE}" \
   data.val_files="${VAL_FILE}" \

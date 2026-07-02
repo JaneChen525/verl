@@ -196,6 +196,10 @@ def compute_advantage(
         data.batch["returns"] = returns
     else:
         # handle all other adv estimator type other than GAE and GRPO
+        # VLN trajectory-level GRPO: register estimator before lookup
+        if adv_estimator in ("grpo_trajectory",):
+            import recipe.vln_navida.vln_traj_grpo  # noqa: F401
+
         adv_estimator_fn = core_algos.get_adv_estimator_fn(adv_estimator)
         adv_kwargs = {
             "token_level_rewards": data.batch["token_level_rewards"],
@@ -206,6 +210,13 @@ def compute_advantage(
             adv_kwargs["index"] = data.non_tensor_batch["uid"]
         if "reward_baselines" in data.batch:  # optional
             adv_kwargs["reward_baselines"] = data.batch["reward_baselines"]
+        # VLN trajectory-level GRPO: pass trajectory_uid and norm flag
+        if adv_estimator in ("grpo_trajectory",):
+            assert "trajectory_uid" in data.non_tensor_batch, (
+                "grpo_trajectory requires trajectory_uid in non_tensor_batch"
+            )
+            adv_kwargs["trajectory_index"] = data.non_tensor_batch["trajectory_uid"]
+            adv_kwargs["norm_adv_by_std_in_grpo"] = norm_adv_by_std_in_grpo
         # GDPO: pass raw data for per-dimension reward extraction
         if adv_estimator in (AdvantageEstimator.GDPO, "gdpo"):
             adv_kwargs["non_tensor_batch"] = data.non_tensor_batch
