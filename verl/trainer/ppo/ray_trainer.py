@@ -979,6 +979,26 @@ class RayPPOTrainer:
                 critic_local_path, critic_remote_path, self.global_steps, max_ckpt_to_keep=max_critic_ckpt_to_keep
             )
 
+        # auto-merge FSDP shards → HuggingFace format
+        if os.environ.get("VLN_AUTO_MERGE_HF", "1") == "1":
+            hf_target = os.path.join(local_global_step_folder, "actor_hf")
+            try:
+                from verl.model_merger.base_model_merger import ModelMergerConfig
+                from verl.model_merger.fsdp_model_merger import FSDPModelMerger
+
+                merge_config = ModelMergerConfig(
+                    operation="merge",
+                    backend="fsdp",
+                    local_dir=actor_local_path,
+                    target_dir=hf_target,
+                    trust_remote_code=True,
+                )
+                merger = FSDPModelMerger(merge_config)
+                merger.merge_and_save()
+                print(f"[VLN] Auto-merged HF checkpoint → {hf_target}")
+            except Exception as e:
+                print(f"[VLN] Auto-merge failed (non-fatal): {e}")
+
         # save dataloader
         local_mkdir_safe(local_global_step_folder)
         dataloader_local_path = os.path.join(local_global_step_folder, "data.pt")

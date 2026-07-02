@@ -113,8 +113,7 @@ python3 -m verl.trainer.main_ppo \
   actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${PPO_MICRO_BATCH_SIZE} \
   actor_rollout_ref.actor.ppo_max_token_len_per_gpu=8192 \
   actor_rollout_ref.actor.use_dynamic_bsz=False \
-  actor_rollout_ref.actor.use_kl_loss=True \
-  actor_rollout_ref.actor.kl_loss_coef=${KL_LOSS_COEF} \
+  actor_rollout_ref.actor.use_kl_loss=False \
   actor_rollout_ref.actor.fsdp_config.fsdp_size=${FSDP_SIZE} \
   actor_rollout_ref.actor.fsdp_config.param_offload=False \
   actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
