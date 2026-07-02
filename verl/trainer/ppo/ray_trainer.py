@@ -991,6 +991,7 @@ class RayPPOTrainer:
                     backend="fsdp",
                     local_dir=actor_local_path,
                     target_dir=hf_target,
+                    hf_model_config_path=os.path.join(actor_local_path, "huggingface"),
                     trust_remote_code=True,
                 )
                 merger = FSDPModelMerger(merge_config)
