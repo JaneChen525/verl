@@ -33,6 +33,7 @@ class DecisionGen:
     mm_processor_kwargs: Optional[dict] = None
     image_indices: Optional[list[int]] = None    # indices into episode b64_buffer
     raw_prompt: Optional[str] = None             # pre-tokenization prompt string
+    position_ids: Optional[list[list[int]]] = None  # full prompt+response, axes x sequence
 
 
 @dataclass

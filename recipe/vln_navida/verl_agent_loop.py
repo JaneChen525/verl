@@ -12,12 +12,17 @@ import os
 from typing import Any
 from uuid import uuid4
 
+import torch
 from PIL import Image
 
-from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutput, register
+from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutput, AgentLoopWorker, register
 from verl.utils.chat_template import apply_chat_template as verl_apply_chat_template
 from verl.utils.profiler import simple_timer
 from verl.utils.rollout_trace import rollout_trace_op
+from verl.utils.tokenizer import (
+    build_multimodal_processor_inputs,
+    normalize_token_ids,
+)
 from verl.workers.rollout.replica import TokenOutput
 
 from recipe.vln_navida.env_pool import VLNEnv
@@ -72,9 +77,18 @@ class VLNFullEpisodeAgentLoop(AgentLoopBase):
                     **self.apply_chat_template_kwargs,
                 ),
             )
-            prompt_ids = await self.apply_chat_template(
-                messages, images=images, mm_processor_kwargs=mm_processor_kwargs,
+            if self.processor is None:
+                raise RuntimeError("VLN multimodal rollout requires a model processor to construct mRoPE position ids")
+            processor_inputs = await self.loop.run_in_executor(
+                None,
+                lambda: build_multimodal_processor_inputs(
+                    self.processor,
+                    text=[raw_prompt],
+                    images=images,
+                    mm_processor_kwargs=mm_processor_kwargs,
+                ),
             )
+            prompt_ids = normalize_token_ids(processor_inputs)
             with simple_timer("generate_sequences", metrics):
                 output: TokenOutput = await self.server_manager.generate(
                     request_id=uuid4().hex,
@@ -83,6 +97,14 @@ class VLNFullEpisodeAgentLoop(AgentLoopBase):
                     image_data=images,
                     mm_processor_kwargs=mm_processor_kwargs,
                 )
+            full_input_ids = torch.tensor([prompt_ids + list(output.token_ids)], dtype=torch.long)
+            full_attention_mask = torch.ones_like(full_input_ids)
+            position_ids = AgentLoopWorker._compute_position_ids(
+                self,
+                full_input_ids,
+                full_attention_mask,
+                processor_inputs,
+            )
             action_text = self.tokenizer.decode(output.token_ids)
             return DecisionGen(
                 action_text=action_text,
@@ -94,6 +116,7 @@ class VLNFullEpisodeAgentLoop(AgentLoopBase):
                 mm_processor_kwargs=mm_processor_kwargs,
                 image_indices=image_indices,
                 raw_prompt=raw_prompt,
+                position_ids=position_ids.squeeze(0).tolist(),
             )
 
         # Drive full episode
@@ -147,6 +170,7 @@ class VLNFullEpisodeAgentLoop(AgentLoopBase):
                     "image_indices": d.gen.image_indices,
                     "raw_prompt": d.gen.raw_prompt,
                     "mm_processor_kwargs": d.gen.mm_processor_kwargs,
+                    "position_ids": d.gen.position_ids,
                     "action_text": d.action_text,
                     "is_stop_action": d.is_stop_action,
                 }

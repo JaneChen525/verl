@@ -112,6 +112,7 @@ class VLNOnlineRolloutManager(AgentLoopManager):
                     "image_indices": dec.get("image_indices"),
                     "raw_prompt": dec.get("raw_prompt"),
                     "mm_processor_kwargs": dec.get("mm_processor_kwargs"),
+                    "position_ids": dec.get("position_ids"),
                     "turn_id": dec["turn_id"],
                     "action_text": dec.get("action_text", ""),
                     "is_stop_action": dec.get("is_stop_action", False),
@@ -165,6 +166,7 @@ class VLNOnlineRolloutManager(AgentLoopManager):
                     "image_indices": [],
                     "raw_prompt": "",
                     "mm_processor_kwargs": {},
+                    "position_ids": [[0], [0], [0], [0]],
                     "uid": f"__vln_padding__{pad_idx}",
                     "trajectory_uid": f"__vln_padding__{pad_idx}",
                     "is_stop_action": False,
@@ -177,10 +179,13 @@ class VLNOnlineRolloutManager(AgentLoopManager):
         attention_mask = torch.zeros(n, prompt_length + response_length, dtype=torch.long)
         response_mask = torch.zeros(n, response_length, dtype=torch.long)
         rm_scores = torch.zeros(n, response_length, dtype=torch.float32)
+        position_ids = torch.zeros(n, 4, prompt_length + response_length, dtype=torch.long)
 
         for i, row in enumerate(all_rows):
-            p_ids = row["prompt_ids"][-prompt_length:]
-            r_ids = row["response_ids"][:response_length]
+            original_prompt_ids = row["prompt_ids"]
+            original_response_ids = row["response_ids"]
+            p_ids = original_prompt_ids[-prompt_length:]
+            r_ids = original_response_ids[:response_length]
             r_mask = row["response_mask"][:response_length]
 
             pad_len = prompt_length - len(p_ids)
@@ -195,13 +200,30 @@ class VLNOnlineRolloutManager(AgentLoopManager):
             if last_valid >= 0:
                 rm_scores[i, last_valid] = float(row["trajectory_reward"])
 
-        input_ids = torch.cat([prompts_t, responses_t], dim=1)
+            row_position_ids = row.get("position_ids")
+            if row_position_ids is None:
+                raise ValueError(
+                    "VLN decision is missing processor-aligned 4-axis position_ids; "
+                    f"trajectory_uid={row.get('trajectory_uid')!r}, turn_id={row.get('turn_id')!r}"
+                )
+            row_position_ids = torch.as_tensor(row_position_ids, dtype=torch.long)
+            expected_length = len(original_prompt_ids) + len(original_response_ids)
+            if row_position_ids.ndim != 2 or row_position_ids.shape != (4, expected_length):
+                raise ValueError(
+                    "VLN decision position_ids must have shape "
+                    f"(4, prompt+response={expected_length}), got {tuple(row_position_ids.shape)}; "
+                    f"trajectory_uid={row.get('trajectory_uid')!r}, turn_id={row.get('turn_id')!r}"
+                )
 
-        position_ids = torch.zeros_like(input_ids)
-        for i in range(n):
-            non_pad = attention_mask[i].sum().item()
-            pad = input_ids.shape[1] - non_pad
-            position_ids[i, pad:] = torch.arange(non_pad)
+            prompt_start = len(original_prompt_ids) - len(p_ids)
+            position_ids[i, :, pad_len:prompt_length] = row_position_ids[
+                :, prompt_start : len(original_prompt_ids)
+            ]
+            position_ids[i, :, prompt_length : prompt_length + len(r_ids)] = row_position_ids[
+                :, len(original_prompt_ids) : len(original_prompt_ids) + len(r_ids)
+            ]
+
+        input_ids = torch.cat([prompts_t, responses_t], dim=1)
 
         non_tensor = {
             "uid": np.array([row["uid"] for row in all_rows], dtype=object),
