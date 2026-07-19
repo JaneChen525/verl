@@ -93,6 +93,9 @@ class VLNOnlineRolloutManager(AgentLoopManager):
                 continue
             group_uid = traj_data["group_uid"]
             trajectory_uid = traj_data["trajectory_uid"]
+            scene_id = traj_data.get("scene_id", "")
+            episode_id = traj_data.get("episode_id", "")
+            instruction = traj_data.get("instruction", "")
             reward = traj_data["reward"]
             num_decisions = traj_data["num_decisions"]
             decisions = traj_data.get("decisions", [])
@@ -115,17 +118,31 @@ class VLNOnlineRolloutManager(AgentLoopManager):
                     "position_ids": dec.get("position_ids"),
                     "turn_id": dec["turn_id"],
                     "action_text": dec.get("action_text", ""),
+                    "parsed_actions": dec.get("parsed_actions", []),
+                    "atomic_actions": dec.get("atomic_actions", []),
+                    "env_step_before": int(dec.get("env_step_before", 0)),
+                    "env_step_after": int(dec.get("env_step_after", 0)),
                     "is_stop_action": dec.get("is_stop_action", False),
                     "uid": group_uid,
                     "trajectory_uid": trajectory_uid,
+                    "scene_id": scene_id,
+                    "episode_id": episode_id,
+                    "instruction": instruction,
+                    "trajectory_metrics": metrics,
                     "trajectory_reward": reward,
                     "trajectory_success": float(metrics.get("success", 0.0)),
                     "decision_reward": float(dec.get("decision_reward", 0.0)),
+                    "discount_to_next": float(dec.get("discount_to_next", 1.0)),
                     "decision_return": float(dec.get("decision_return", 0.0)),
                     "start_position": dec.get("start_position", []),
                     "start_heading": dec.get("start_heading", []),
                     "end_position": dec.get("end_position", []),
                     "end_heading": dec.get("end_heading", []),
+                    "start_map_position": dec.get("start_map_position", []),
+                    "end_map_position": dec.get("end_map_position", []),
+                    "map_path": dec.get("map_path", []),
+                    "atomic_rewards": dec.get("atomic_rewards", []),
+                    "distance_path": dec.get("distance_path", []),
                     "start_distance": float(dec.get("start_distance", 0.0)),
                     "end_distance": float(dec.get("end_distance", 0.0)),
                     "training_score": dec.get("training_score", reward),
@@ -160,6 +177,12 @@ class VLNOnlineRolloutManager(AgentLoopManager):
             )
         elif credit_mode not in {"", "off", "none"}:
             raise ValueError(f"Unsupported VLN credit mode: {credit_mode}")
+
+        trace_path = os.environ.get("VLN_DECISION_TRACE_PATH")
+        if trace_path:
+            from recipe.vln_navida.rollout_trace import export_decision_trace
+
+            export_decision_trace(all_rows, meta_info, trace_path)
 
         prompt_length = self.rollout_config.prompt_length
         response_length = self.rollout_config.response_length

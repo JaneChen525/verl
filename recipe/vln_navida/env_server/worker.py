@@ -50,6 +50,19 @@ def _agent_pose(env) -> tuple[list[float], list[float]]:
     return position.tolist(), heading.tolist()
 
 
+def _agent_map_position(info: dict) -> list[float]:
+    """Return the top-down-map agent coordinate as ``[x, y]``."""
+    top_down_map = info.get("top_down_map") or {}
+    coordinates = np.asarray(top_down_map.get("agent_map_coord", []))
+    if coordinates.shape == (2,):
+        row, column = coordinates
+    elif coordinates.ndim == 2 and coordinates.shape[1] == 2 and len(coordinates):
+        row, column = coordinates[0]
+    else:
+        return []
+    return [float(column), float(row)]
+
+
 def _make_metrics(info: dict, collisions: int, env) -> dict:
     ne = float(info.get("distance_to_goal", 0.0))
     position, heading = _agent_pose(env)
@@ -62,6 +75,7 @@ def _make_metrics(info: dict, collisions: int, env) -> dict:
         "collisions": float(collisions),
         "position": position,
         "heading": heading,
+        "map_position": _agent_map_position(info),
     }
 
 

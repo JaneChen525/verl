@@ -53,6 +53,11 @@ class DecisionRecord:
     start_heading: list[float] = field(default_factory=list)
     end_position: list[float] = field(default_factory=list)
     end_heading: list[float] = field(default_factory=list)
+    start_map_position: list[float] = field(default_factory=list)
+    end_map_position: list[float] = field(default_factory=list)
+    map_path: list[list[float]] = field(default_factory=list)
+    atomic_rewards: list[float] = field(default_factory=list)
+    distance_path: list[float] = field(default_factory=list)
     start_distance: float = 0.0
     end_distance: float = 0.0
 
@@ -106,6 +111,7 @@ async def run_episode(
         start_metrics = env.metrics()
         start_position = [float(x) for x in start_metrics.get("position", [])]
         start_heading = [float(x) for x in start_metrics.get("heading", [])]
+        start_map_position = [float(x) for x in start_metrics.get("map_position", [])]
         start_distance = float(start_metrics.get("distance_to_goal", 0.0))
         gen = await decide(env.instruction, history_window, all_frames)
         parsed = parse_navida_action(gen.action_text)
@@ -114,6 +120,9 @@ async def run_episode(
         decision_reward = 0.0
         discount_to_next = 1.0
         executed_chunk: list[int] = []
+        map_path = [start_map_position] if start_map_position else []
+        atomic_rewards: list[float] = []
+        distance_path = [start_distance]
 
         if not chunk:
             decisions.append(DecisionRecord(
@@ -122,6 +131,11 @@ async def run_episode(
                 env_step_after=env_steps, is_stop_action=False, gen=gen,
                 start_position=start_position, start_heading=start_heading,
                 end_position=start_position, end_heading=start_heading,
+                start_map_position=start_map_position,
+                end_map_position=start_map_position,
+                map_path=map_path,
+                atomic_rewards=atomic_rewards,
+                distance_path=distance_path,
                 start_distance=start_distance, end_distance=start_distance,
             ))
             break
@@ -136,12 +150,17 @@ async def run_episode(
                 history_window = history_window[1:]
             env_steps += 1
             done = resp["done"]
+            step_metrics = resp["metrics"]
+            current_distance = float(step_metrics["distance_to_goal"])
+            map_position = [float(x) for x in step_metrics.get("map_position", [])]
+            if map_position:
+                map_path.append(map_position)
+            distance_path.append(current_distance)
             if dense_enabled:
-                step_metrics = resp["metrics"]
-                current_distance = float(step_metrics["distance_to_goal"])
                 atomic_reward = previous_distance - current_distance - 0.01
                 if done:
                     atomic_reward += 2.5 * float(step_metrics.get("success", 0.0))
+                atomic_rewards.append(atomic_reward)
                 decision_reward += discount_to_next * atomic_reward
                 discount_to_next *= dense_gamma
                 previous_distance = current_distance
@@ -160,6 +179,11 @@ async def run_episode(
             start_heading=start_heading,
             end_position=[float(x) for x in end_metrics.get("position", [])],
             end_heading=[float(x) for x in end_metrics.get("heading", [])],
+            start_map_position=start_map_position,
+            end_map_position=[float(x) for x in end_metrics.get("map_position", [])],
+            map_path=map_path,
+            atomic_rewards=atomic_rewards,
+            distance_path=distance_path,
             start_distance=start_distance,
             end_distance=float(end_metrics.get("distance_to_goal", 0.0)),
         ))

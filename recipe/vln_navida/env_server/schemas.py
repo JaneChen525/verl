@@ -1,7 +1,7 @@
 """Pydantic schemas for the VLN Habitat env server API (design doc §7)."""
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 # ── Observation ──────────────────────────────────────────────────────────────
@@ -22,6 +22,7 @@ class Metrics(BaseModel):
     collisions: float
     position: list[float]
     heading: list[float]
+    map_position: list[float] = Field(default_factory=list)
 
 
 class EpisodeInfo(BaseModel):
