@@ -37,8 +37,10 @@ def _agent_pose(env) -> tuple[list[float], list[float]]:
 
     state = env.sim.get_agent_state()
     position = np.asarray(state.position, dtype=np.float64)
+    # Habitat-Sim 0.3.3 body motion follows rotation * local(-Z).  Keep this
+    # convention guarded by the env4 turn+forward displacement smoke.
     forward = quaternion_rotate_vector(
-        state.rotation.inverse(), np.array([0.0, 0.0, -1.0], dtype=np.float64)
+        state.rotation, np.array([0.0, 0.0, -1.0], dtype=np.float64)
     )
     heading = np.asarray([forward[0], forward[2]], dtype=np.float64)
     norm = float(np.linalg.norm(heading))
