@@ -119,6 +119,15 @@ class VLNOnlineRolloutManager(AgentLoopManager):
                     "uid": group_uid,
                     "trajectory_uid": trajectory_uid,
                     "trajectory_reward": reward,
+                    "trajectory_success": float(metrics.get("success", 0.0)),
+                    "decision_reward": float(dec.get("decision_reward", 0.0)),
+                    "decision_return": float(dec.get("decision_return", 0.0)),
+                    "start_position": dec.get("start_position", []),
+                    "start_heading": dec.get("start_heading", []),
+                    "end_position": dec.get("end_position", []),
+                    "end_heading": dec.get("end_heading", []),
+                    "start_distance": float(dec.get("start_distance", 0.0)),
+                    "end_distance": float(dec.get("end_distance", 0.0)),
                     "training_score": dec.get("training_score", reward),
                     "decision_loss_weight": 1.0 / max(num_decisions, 1),
                 })
@@ -127,6 +136,31 @@ class VLNOnlineRolloutManager(AgentLoopManager):
 
     def _build_output(self, all_rows, traj_rewards, traj_successes, meta_info) -> DataProto:
         """Build padded DataProto from collected decision rows."""
+        credit_mode = os.environ.get("VLN_CREDIT_MODE", "off").lower()
+        credit_metrics = {}
+        if credit_mode == "success_buffer":
+            if os.environ.get("VLN_REWARD_MODE", "sparse_sr") != "p15_dense":
+                raise ValueError(
+                    "VLN_CREDIT_MODE=success_buffer requires VLN_REWARD_MODE=p15_dense"
+                )
+            from recipe.vln_navida.decision_credit import assign_success_buffer_credit
+
+            credit_metrics = assign_success_buffer_credit(
+                all_rows,
+                radius=float(os.environ.get("VLN_CREDIT_RADIUS", "1.5")),
+                direction_beta=float(os.environ.get("VLN_CREDIT_DIRECTION_BETA", "0.5")),
+                candidate_window=int(os.environ.get("VLN_CREDIT_WINDOW", "3")),
+                exit_horizon=int(os.environ.get("VLN_CREDIT_HORIZON", "2")),
+                temperature=float(os.environ.get("VLN_CREDIT_TEMPERATURE", "0.2")),
+                key_penalty=float(os.environ.get("VLN_CREDIT_KEY_PENALTY", "1.0")),
+                reward_scale=float(os.environ.get("VLN_CREDIT_REWARD_SCALE", "1.0")),
+                stagnation_progress=float(
+                    os.environ.get("VLN_CREDIT_STAGNATION_PROGRESS", "0.25")
+                ),
+            )
+        elif credit_mode not in {"", "off", "none"}:
+            raise ValueError(f"Unsupported VLN credit mode: {credit_mode}")
+
         prompt_length = self.rollout_config.prompt_length
         response_length = self.rollout_config.response_length
 
@@ -256,13 +290,14 @@ class VLNOnlineRolloutManager(AgentLoopManager):
         output.meta_info["vln_flattened"] = True
         output.meta_info["seqlen_sorted_indices"] = list(range(n))
 
+        vln_metrics = dict(credit_metrics)
         if traj_rewards:
             r = np.array(traj_rewards)
             s = np.array(traj_successes)
             print(f"[VLN rollout] {len(traj_rewards)} trajectories, "
                   f"{real_decision_count} decisions (padded {n}), "
                   f"SR={s.mean():.1%}, reward={r.mean():.3f}±{r.std():.3f}")
-            output.meta_info["vln_metrics"] = {
+            vln_metrics.update({
                 "vln/traj_reward/mean": float(r.mean()),
                 "vln/traj_reward/std": float(r.std()),
                 "vln/traj_reward/max": float(r.max()),
@@ -270,7 +305,9 @@ class VLNOnlineRolloutManager(AgentLoopManager):
                 "vln/traj_sr": float(s.mean()),
                 "vln/traj_count": len(traj_rewards),
                 "vln/avg_decisions_per_traj": real_decision_count / len(traj_rewards),
-            }
+            })
+        if vln_metrics:
+            output.meta_info["vln_metrics"] = vln_metrics
 
         return output
 

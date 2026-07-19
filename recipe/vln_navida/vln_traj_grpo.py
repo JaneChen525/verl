@@ -37,6 +37,20 @@ def compute_p15_dense_return_advantage(
     return advantages, returns
 
 
+@register_adv_est("decision_credit")
+def compute_decision_credit_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Broadcast the P16 precomputed decision score to its response tokens."""
+    return compute_p15_dense_return_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        **kwargs,
+    )
+
+
 @register_adv_est("grpo_trajectory")
 def compute_grpo_trajectory_advantage(
     token_level_rewards: torch.Tensor,

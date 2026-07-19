@@ -32,8 +32,25 @@ def _make_obs(rgb: np.ndarray, instruction: str, step: int) -> dict:
             "instruction": instruction}
 
 
-def _make_metrics(info: dict, collisions: int) -> dict:
+def _agent_pose(env) -> tuple[list[float], list[float]]:
+    from habitat.utils.geometry_utils import quaternion_rotate_vector
+
+    state = env.sim.get_agent_state()
+    position = np.asarray(state.position, dtype=np.float64)
+    forward = quaternion_rotate_vector(
+        state.rotation.inverse(), np.array([0.0, 0.0, -1.0], dtype=np.float64)
+    )
+    heading = np.asarray([forward[0], forward[2]], dtype=np.float64)
+    norm = float(np.linalg.norm(heading))
+    if not np.all(np.isfinite(position)) or not np.isfinite(norm) or norm <= 1e-8:
+        raise ValueError("invalid Habitat agent pose")
+    heading /= norm
+    return position.tolist(), heading.tolist()
+
+
+def _make_metrics(info: dict, collisions: int, env) -> dict:
     ne = float(info.get("distance_to_goal", 0.0))
+    position, heading = _agent_pose(env)
     return {
         "distance_to_goal": ne,
         "success": float(info.get("success", 0.0)),
@@ -41,6 +58,8 @@ def _make_metrics(info: dict, collisions: int) -> dict:
         "oracle_success": float(info.get("oracle_success", 0.0)),
         "oracle_navigation_error": ne,
         "collisions": float(collisions),
+        "position": position,
+        "heading": heading,
     }
 
 
@@ -118,7 +137,7 @@ def worker_loop(worker_id: int, exp_config_path: str,
                 resp_queue.put({
                     "ok": True,
                     "obs": _make_obs(obs["rgb"], obs["instruction"]["text"], step_count),
-                    "metrics": _make_metrics(info, collisions),
+                    "metrics": _make_metrics(info, collisions, env),
                     "scene_id": scene_id,
                     "episode_id": ep_id,
                     "instruction": obs["instruction"]["text"],
@@ -147,7 +166,7 @@ def worker_loop(worker_id: int, exp_config_path: str,
                 resp_queue.put({
                     "ok": True,
                     "obs": _make_obs(last_obs["rgb"], last_obs["instruction"]["text"], step_count),
-                    "metrics": _make_metrics(info, collisions),
+                    "metrics": _make_metrics(info, collisions, env),
                     "done": done,
                     "done_reason": done_reason,
                     "executed_actions": actions[:actions.index(0) + 1] if (0 in actions and done_reason == "stop_action") else actions,
@@ -156,7 +175,7 @@ def worker_loop(worker_id: int, exp_config_path: str,
 
             if op == "metrics":
                 info = env.get_metrics() if current_episode is not None else {}
-                resp_queue.put({"ok": True, "metrics": _make_metrics(info, collisions),
+                resp_queue.put({"ok": True, "metrics": _make_metrics(info, collisions, env),
                                 "done": env.episode_over if current_episode else False})
                 continue
 

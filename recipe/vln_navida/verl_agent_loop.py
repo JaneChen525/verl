@@ -180,6 +180,12 @@ class VLNFullEpisodeAgentLoop(AgentLoopBase):
                     "is_stop_action": d.is_stop_action,
                     "decision_reward": d.decision_reward,
                     "decision_return": d.decision_return,
+                    "start_position": d.start_position,
+                    "start_heading": d.start_heading,
+                    "end_position": d.end_position,
+                    "end_heading": d.end_heading,
+                    "start_distance": d.start_distance,
+                    "end_distance": d.end_distance,
                     "training_score": (
                         d.decision_return if self.reward_mode == "p15_dense" else traj.reward
                     ),

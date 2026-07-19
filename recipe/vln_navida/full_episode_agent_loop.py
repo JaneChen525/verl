@@ -49,6 +49,12 @@ class DecisionRecord:
     decision_reward: float = 0.0
     discount_to_next: float = 1.0
     decision_return: float = 0.0
+    start_position: list[float] = field(default_factory=list)
+    start_heading: list[float] = field(default_factory=list)
+    end_position: list[float] = field(default_factory=list)
+    end_heading: list[float] = field(default_factory=list)
+    start_distance: float = 0.0
+    end_distance: float = 0.0
 
 
 @dataclass
@@ -97,23 +103,32 @@ async def run_episode(
     previous_distance = float(env.metrics().get("distance_to_goal", 0.0))
 
     while not done and len(decisions) < max_decisions and env_steps < max_env_steps:
+        start_metrics = env.metrics()
+        start_position = [float(x) for x in start_metrics.get("position", [])]
+        start_heading = [float(x) for x in start_metrics.get("heading", [])]
+        start_distance = float(start_metrics.get("distance_to_goal", 0.0))
         gen = await decide(env.instruction, history_window, all_frames)
         parsed = parse_navida_action(gen.action_text)
         chunk = to_atomic_chunk(parsed)
         step_before = env_steps
         decision_reward = 0.0
         discount_to_next = 1.0
+        executed_chunk: list[int] = []
 
         if not chunk:
             decisions.append(DecisionRecord(
                 turn_id=len(decisions), action_text=gen.action_text,
                 parsed_actions=parsed, atomic_chunk=[], env_step_before=env_steps,
                 env_step_after=env_steps, is_stop_action=False, gen=gen,
+                start_position=start_position, start_heading=start_heading,
+                end_position=start_position, end_heading=start_heading,
+                start_distance=start_distance, end_distance=start_distance,
             ))
             break
 
         for atomic in chunk:
             resp = await env.step([atomic])
+            executed_chunk.extend(int(action) for action in resp.get("executed_actions", [atomic]))
             frame = env.current_jpeg_b64()
             all_frames.append(frame)
             history_window.append(frame)
@@ -133,13 +148,20 @@ async def run_episode(
             if done:
                 break
 
+        end_metrics = env.metrics()
         decisions.append(DecisionRecord(
             turn_id=len(decisions), action_text=gen.action_text,
-            parsed_actions=parsed, atomic_chunk=chunk,
+            parsed_actions=parsed, atomic_chunk=executed_chunk,
             env_step_before=step_before, env_step_after=env_steps,
-            is_stop_action=(0 in chunk), gen=gen,
+            is_stop_action=(0 in executed_chunk), gen=gen,
             decision_reward=decision_reward,
             discount_to_next=discount_to_next,
+            start_position=start_position,
+            start_heading=start_heading,
+            end_position=[float(x) for x in end_metrics.get("position", [])],
+            end_heading=[float(x) for x in end_metrics.get("heading", [])],
+            start_distance=start_distance,
+            end_distance=float(end_metrics.get("distance_to_goal", 0.0)),
         ))
 
     if dense_enabled:

@@ -72,6 +72,19 @@ TEST_FREQ=${TEST_FREQ:--1}
 
 # ── Launch ────────────────────────────────────────────────────────────────────
 ADV_ESTIMATOR=${ADV_ESTIMATOR:-grpo}
+VLN_CREDIT_MODE=${VLN_CREDIT_MODE:-off}
+if [[ "$VLN_CREDIT_MODE" == "success_buffer" && "${VLN_REWARD_MODE:-sparse_sr}" != "p15_dense" ]]; then
+  echo "VLN_CREDIT_MODE=success_buffer requires VLN_REWARD_MODE=p15_dense" >&2
+  exit 2
+fi
+if [[ "$VLN_CREDIT_MODE" == "success_buffer" && "$ADV_ESTIMATOR" != "decision_credit" ]]; then
+  echo "VLN_CREDIT_MODE=success_buffer requires ADV_ESTIMATOR=decision_credit" >&2
+  exit 2
+fi
+if [[ "$ADV_ESTIMATOR" == "decision_credit" && "$VLN_CREDIT_MODE" != "success_buffer" ]]; then
+  echo "ADV_ESTIMATOR=decision_credit requires VLN_CREDIT_MODE=success_buffer" >&2
+  exit 2
+fi
 
 python3 -m verl.trainer.main_ppo \
   algorithm.adv_estimator=${ADV_ESTIMATOR} \

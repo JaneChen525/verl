@@ -20,6 +20,8 @@ class Metrics(BaseModel):
     oracle_success: float
     oracle_navigation_error: float
     collisions: float
+    position: list[float]
+    heading: list[float]
 
 
 class EpisodeInfo(BaseModel):

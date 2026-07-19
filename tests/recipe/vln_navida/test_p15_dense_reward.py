@@ -64,6 +64,33 @@ class P15DenseRewardTest(unittest.TestCase):
         )
         self.assertEqual(trajectory.reward, 1.0)
 
+    def test_unexecuted_stop_is_not_marked_as_stop(self):
+        class MaxStepEnv(FakeEnv):
+            async def step(self, actions):
+                self._step += 1
+                self._metrics = {"distance_to_goal": 4.75, "success": 0.0}
+                return {
+                    "done": True,
+                    "metrics": dict(self._metrics),
+                    "executed_actions": [actions[0]],
+                }
+
+        async def decide(instruction, history_window, all_frames):
+            return DecisionGen(action_text="<answer>forward 25</answer>, <answer>stop</answer>")
+
+        trajectory = asyncio.run(
+            run_episode(
+                MaxStepEnv(),
+                {"episode_id": "1", "scene_id": "scene"},
+                decide,
+                group_uid="group",
+                trajectory_uid="trajectory",
+            )
+        )
+
+        self.assertEqual(trajectory.decisions[0].atomic_chunk, [1])
+        self.assertFalse(trajectory.decisions[0].is_stop_action)
+
 
 if __name__ == "__main__":
     unittest.main()
