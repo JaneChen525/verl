@@ -197,7 +197,7 @@ def compute_advantage(
     else:
         # handle all other adv estimator type other than GAE and GRPO
         # VLN trajectory-level GRPO: register estimator before lookup
-        if adv_estimator in ("grpo_trajectory",):
+        if adv_estimator in ("grpo_trajectory", "p15_dense_return"):
             import recipe.vln_navida.vln_traj_grpo  # noqa: F401
 
         adv_estimator_fn = core_algos.get_adv_estimator_fn(adv_estimator)

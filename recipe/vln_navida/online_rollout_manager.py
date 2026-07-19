@@ -119,6 +119,7 @@ class VLNOnlineRolloutManager(AgentLoopManager):
                     "uid": group_uid,
                     "trajectory_uid": trajectory_uid,
                     "trajectory_reward": reward,
+                    "training_score": dec.get("training_score", reward),
                     "decision_loss_weight": 1.0 / max(num_decisions, 1),
                 })
 
@@ -159,6 +160,7 @@ class VLNOnlineRolloutManager(AgentLoopManager):
                     "response_logprobs": None,
                     "response_mask": [],
                     "trajectory_reward": 0.0,
+                    "training_score": 0.0,
                     "decision_loss_weight": 0.0,
                     "turn_id": -1,
                     "action_text": "",
@@ -198,7 +200,7 @@ class VLNOnlineRolloutManager(AgentLoopManager):
 
             last_valid = len(r_ids) - 1
             if last_valid >= 0:
-                rm_scores[i, last_valid] = float(row["trajectory_reward"])
+                rm_scores[i, last_valid] = float(row["training_score"])
 
             row_position_ids = row.get("position_ids")
             if row_position_ids is None:

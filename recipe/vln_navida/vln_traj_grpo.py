@@ -22,6 +22,21 @@ import torch
 from verl.trainer.ppo.core_algos import register_adv_est
 
 
+@register_adv_est("p15_dense_return")
+def compute_p15_dense_return_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Use the precomputed decision return directly as A=G, without normalization."""
+    del kwargs
+    with torch.no_grad():
+        scores = token_level_rewards.sum(dim=-1)
+        returns = scores.unsqueeze(-1) * response_mask
+        advantages = returns.clone()
+    return advantages, returns
+
+
 @register_adv_est("grpo_trajectory")
 def compute_grpo_trajectory_advantage(
     token_level_rewards: torch.Tensor,

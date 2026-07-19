@@ -44,10 +44,13 @@ class VLNFullEpisodeAgentLoop(AgentLoopBase):
     """One run() = one full episode. Decisions stored in extra_fields for flatten."""
 
     def __init__(self, *args, env_server_url: str = "http://127.0.0.1:8002",
-                 progress_coef: float = 0.0, **kwargs):
+                 progress_coef: float = 0.0, reward_mode: str = "sparse_sr",
+                 dense_gamma: float = 0.95, **kwargs):
         super().__init__(*args, **kwargs)
         self.env_server_url = os.environ.get("VLN_ENV_SERVER_URL", env_server_url)
         self.progress_coef = float(os.environ.get("VLN_PROGRESS_COEF", progress_coef))
+        self.reward_mode = os.environ.get("VLN_REWARD_MODE", reward_mode)
+        self.dense_gamma = float(os.environ.get("VLN_DENSE_GAMMA", dense_gamma))
         self.prompt_length = self.rollout_config.prompt_length
         self.response_length = self.rollout_config.response_length
 
@@ -127,6 +130,8 @@ class VLNFullEpisodeAgentLoop(AgentLoopBase):
                 group_uid=uid,
                 trajectory_uid=f"{uid}#{uuid4().hex[:8]}",
                 progress_coef=self.progress_coef,
+                reward_mode=self.reward_mode,
+                dense_gamma=self.dense_gamma,
             )
         finally:
             await env.close()
@@ -173,6 +178,11 @@ class VLNFullEpisodeAgentLoop(AgentLoopBase):
                     "position_ids": d.gen.position_ids,
                     "action_text": d.action_text,
                     "is_stop_action": d.is_stop_action,
+                    "decision_reward": d.decision_reward,
+                    "decision_return": d.decision_return,
+                    "training_score": (
+                        d.decision_return if self.reward_mode == "p15_dense" else traj.reward
+                    ),
                 }
                 for d in traj.decisions
                 if d.gen.prompt_ids is not None

@@ -46,6 +46,9 @@ class DecisionRecord:
     env_step_after: int
     is_stop_action: bool
     gen: DecisionGen
+    decision_reward: float = 0.0
+    discount_to_next: float = 1.0
+    decision_return: float = 0.0
 
 
 @dataclass
@@ -71,6 +74,8 @@ async def run_episode(
     max_decisions: int = 64,
     max_env_steps: int = 200,                        # P7 target (report/020)
     progress_coef: float = 0.0,
+    reward_mode: str = "sparse_sr",
+    dense_gamma: float = 0.95,
 ) -> TrajectoryRecord:
     """Drive one full episode. env must NOT be reset yet; this function resets it.
 
@@ -84,12 +89,20 @@ async def run_episode(
     decisions: list[DecisionRecord] = []
     env_steps = 0
     done = False
+    dense_enabled = reward_mode == "p15_dense"
+    if reward_mode not in {"sparse_sr", "p15_dense"}:
+        raise ValueError(f"Unsupported VLN reward mode: {reward_mode}")
+    if dense_enabled and not 0.0 <= dense_gamma <= 1.0:
+        raise ValueError(f"dense_gamma must be in [0, 1], got {dense_gamma}")
+    previous_distance = float(env.metrics().get("distance_to_goal", 0.0))
 
     while not done and len(decisions) < max_decisions and env_steps < max_env_steps:
         gen = await decide(env.instruction, history_window, all_frames)
         parsed = parse_navida_action(gen.action_text)
         chunk = to_atomic_chunk(parsed)
         step_before = env_steps
+        decision_reward = 0.0
+        discount_to_next = 1.0
 
         if not chunk:
             decisions.append(DecisionRecord(
@@ -108,6 +121,15 @@ async def run_episode(
                 history_window = history_window[1:]
             env_steps += 1
             done = resp["done"]
+            if dense_enabled:
+                step_metrics = resp["metrics"]
+                current_distance = float(step_metrics["distance_to_goal"])
+                atomic_reward = previous_distance - current_distance - 0.01
+                if done:
+                    atomic_reward += 2.5 * float(step_metrics.get("success", 0.0))
+                decision_reward += discount_to_next * atomic_reward
+                discount_to_next *= dense_gamma
+                previous_distance = current_distance
             if done:
                 break
 
@@ -116,7 +138,17 @@ async def run_episode(
             parsed_actions=parsed, atomic_chunk=chunk,
             env_step_before=step_before, env_step_after=env_steps,
             is_stop_action=(0 in chunk), gen=gen,
+            decision_reward=decision_reward,
+            discount_to_next=discount_to_next,
         ))
+
+    if dense_enabled:
+        running_return = 0.0
+        for decision in reversed(decisions):
+            running_return = (
+                decision.decision_reward + decision.discount_to_next * running_return
+            )
+            decision.decision_return = running_return
 
     metrics = env.metrics()
     metrics["num_decisions"] = len(decisions)
