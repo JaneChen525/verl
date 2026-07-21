@@ -72,6 +72,15 @@ TEST_FREQ=${TEST_FREQ:--1}
 
 # ── Launch ────────────────────────────────────────────────────────────────────
 ADV_ESTIMATOR=${ADV_ESTIMATOR:-grpo}
+if [[ "$ADV_ESTIMATOR" == "grpo_dense_hybrid" && "${VLN_REWARD_MODE:-sparse_sr}" != "p15_dense" ]]; then
+  echo "ADV_ESTIMATOR=grpo_dense_hybrid requires VLN_REWARD_MODE=p15_dense" >&2
+  exit 2
+fi
+if [[ "$ADV_ESTIMATOR" == "grpo_dense_hybrid" ]]; then
+  export VLN_DENSE_LAMBDA=${VLN_DENSE_LAMBDA:-0.2}
+  export VLN_DENSE_CLIP=${VLN_DENSE_CLIP:-3.0}
+  echo "[VLN hybrid] lambda=${VLN_DENSE_LAMBDA}, clip=${VLN_DENSE_CLIP}"
+fi
 
 python3 -m verl.trainer.main_ppo \
   algorithm.adv_estimator=${ADV_ESTIMATOR} \

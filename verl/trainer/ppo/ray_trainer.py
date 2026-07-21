@@ -197,7 +197,7 @@ def compute_advantage(
     else:
         # handle all other adv estimator type other than GAE and GRPO
         # VLN trajectory-level GRPO: register estimator before lookup
-        if adv_estimator in ("grpo_trajectory", "p15_dense_return"):
+        if adv_estimator in ("grpo_trajectory", "p15_dense_return", "grpo_dense_hybrid"):
             import recipe.vln_navida.vln_traj_grpo  # noqa: F401
 
         adv_estimator_fn = core_algos.get_adv_estimator_fn(adv_estimator)
@@ -211,12 +211,19 @@ def compute_advantage(
         if "reward_baselines" in data.batch:  # optional
             adv_kwargs["reward_baselines"] = data.batch["reward_baselines"]
         # VLN trajectory-level GRPO: pass trajectory_uid and norm flag
-        if adv_estimator in ("grpo_trajectory",):
+        if adv_estimator in ("grpo_trajectory", "grpo_dense_hybrid"):
             assert "trajectory_uid" in data.non_tensor_batch, (
-                "grpo_trajectory requires trajectory_uid in non_tensor_batch"
+                f"{adv_estimator} requires trajectory_uid in non_tensor_batch"
             )
             adv_kwargs["trajectory_index"] = data.non_tensor_batch["trajectory_uid"]
             adv_kwargs["norm_adv_by_std_in_grpo"] = norm_adv_by_std_in_grpo
+        if adv_estimator == "grpo_dense_hybrid":
+            for key in ("trajectory_reward", "decision_loss_weight"):
+                assert key in data.non_tensor_batch, (
+                    f"grpo_dense_hybrid requires {key} in non_tensor_batch"
+                )
+            adv_kwargs["trajectory_rewards"] = data.non_tensor_batch["trajectory_reward"]
+            adv_kwargs["decision_loss_weight"] = data.non_tensor_batch["decision_loss_weight"]
         # GDPO: pass raw data for per-dimension reward extraction
         if adv_estimator in (AdvantageEstimator.GDPO, "gdpo"):
             adv_kwargs["non_tensor_batch"] = data.non_tensor_batch
